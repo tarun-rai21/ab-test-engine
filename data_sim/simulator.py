@@ -32,9 +32,8 @@ assumed up front — see inline comments at each site for the specific evidence:
 
 from __future__ import annotations
 
-from typing import Callable
-
 from datetime import datetime, timedelta
+from typing import Callable
 
 import numpy as np
 import pandas as pd
