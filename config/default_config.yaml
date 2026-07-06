@@ -1,0 +1,23 @@
+simulator:
+  n_users: 10000
+  baseline_rate: 0.10
+  true_effect: 0.02
+  covariate_correlation: 0.5
+  seed: 42
+  corrupted_split: null
+  segment_heterogeneity: null
+
+power_analysis:
+  alpha: 0.05
+  power: 0.80
+
+srm:
+  flag_threshold: 0.001
+
+sequential:
+  n_simulations: 500
+  n_checkpoints: 10
+  total_alpha: 0.05
+
+segments:
+  fdr_q: 0.05
