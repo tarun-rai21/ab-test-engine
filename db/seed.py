@@ -118,7 +118,17 @@ def seed_database(config: dict, database_url: str | None = None) -> None:
 
     _delete_existing_experiment(engine, sim.experiment_id)
 
-    treatment_pct = sim.corrupted_split if sim.corrupted_split is not None else 0.5
+    # CRITICAL: split_pct records the INTENDED design split — always 50/50 for
+    # this project's scope — NEVER the corrupted_split value. corrupted_split
+    # simulates a randomization BUG that causes actual traffic to deviate from
+    # this intended split; it must not also overwrite what the system believes
+    # was intended, or SRM's observed-vs-expected comparison becomes a
+    # tautology (comparing the bug's output against itself).
+    #
+    # This was a REAL bug, found via test_full_pipeline_detects_corrupted_split:
+    # a 55/45 corrupted split was NOT flagged because variants.split_pct had
+    # ALSO been set to 0.55/0.45, so SRM correctly found observed≈expected.
+    intended_treatment_pct = 0.5
 
     experiments_df = pd.DataFrame([{
         "experiment_id": sim.experiment_id,
@@ -131,24 +141,15 @@ def seed_database(config: dict, database_url: str | None = None) -> None:
 
     variants_df = pd.DataFrame([
         {"variant_id": f"{sim.experiment_id}_control", "experiment_id": sim.experiment_id,
-         "name": "control", "split_pct": 1 - treatment_pct},
+         "name": "control", "split_pct": 1 - intended_treatment_pct},
         {"variant_id": f"{sim.experiment_id}_treatment", "experiment_id": sim.experiment_id,
-         "name": "treatment", "split_pct": treatment_pct},
+         "name": "treatment", "split_pct": intended_treatment_pct},
     ])
 
     users_df = coerce_for_sqlite(users_df)
     assignments_df = coerce_for_sqlite(assignments_df)
     events_df = coerce_for_sqlite(events_df)
 
-    # Insertion order = parent before child (see _DELETE_ORDER's docstring for
-    # the reverse-order deletion reasoning). NOT enforced by SQLite by default,
-    # so getting this order wrong would silently insert orphaned rows rather
-    # than error — correctness by construction, not by DB-enforced constraint.
-    #
-    # users uses if_exists="append" unconditionally (never deleted above) —
-    # since user_id generation is deterministic (f"u_{i:07d}"), reinserting
-    # the SAME user_ids on a rerun with the SAME n_users would violate the
-    # users PRIMARY KEY. Guard against that specific case:
     with engine.begin() as conn:
         existing_user_ids = pd.read_sql(text("SELECT user_id FROM users"), conn)["user_id"].tolist()
         new_users = users_df[~users_df["user_id"].isin(existing_user_ids)]
