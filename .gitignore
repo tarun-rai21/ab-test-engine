@@ -1,0 +1,55 @@
+# --- Environment / secrets (preemptive — no .env exists yet, but if one is
+# added later for a real secret, it must never be committed) ---
+.env
+*.env.local
+
+# --- Python ---
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+
+# --- Virtual environments ---
+venv/
+env/
+ENV/
+.venv/
+
+# --- Packaging / build artifacts ---
+build/
+dist/
+*.egg-info/
+.eggs/
+
+# --- Testing / coverage ---
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+
+# --- Type checking / linting caches ---
+.mypy_cache/
+.ruff_cache/
+
+# --- Databases (local dev artifacts — schema.sql is the source of truth,
+# not the binary file; regenerated via db/seed.py, never committed) ---
+local.db
+*.sqlite3
+*.db-journal
+
+# --- Jupyter ---
+.ipynb_checkpoints/
+
+# --- OS-specific junk ---
+.DS_Store
+Thumbs.db
+
+# --- IDE ---
+.idea/
+.vscode/
+
+# --- Streamlit ---
+.streamlit/secrets.toml
+
+# --- Validation harness output is INTENTIONALLY NOT ignored — see below ---
