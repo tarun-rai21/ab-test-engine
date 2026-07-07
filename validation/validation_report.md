@@ -48,3 +48,45 @@ this scale.
   (point-biserial correlation) with true_effect=0 — variance-reduction
   behavior under a nonzero true effect, or on a continuous metric, is not
   separately validated.
+
+## 4. Sequential Testing — Naive Peeking Inflation and Correction
+
+**Target (naive):** 20%-35% empirical FPR under repeated peeking, per spec
+Section 7.6 / published literature.
+
+**Configuration:** 500 independent null-effect simulated experiments,
+10 checkpoints of 200 observations per arm each (cumulative 200-2000),
+flat naive alpha=0.05 at every checkpoint, seed=2024.
+
+**Result:** empirical FPR = **22.0%** (110/500) — roughly 4.4x the nominal
+5% rate, confirming naive repeated significance testing meaningfully
+inflates false positives.
+
+**Target (corrected):** roughly 4%-6.5% of nominal 5%, per spec Section 7.6.
+
+**Configuration:** identical 500 simulations (SAME seed, common random
+numbers), now using an O'Brien-Fleming-style alpha-spending schedule
+(closed-form approximation, not exact Lan-DeMets) instead of a flat threshold.
+
+**Result:** empirical FPR = **6.6%** (33/500) — a ~3.3x reduction from the
+naive 22.0%, landing within ~0.09 SE of the nominal band's edge (statistically
+indistinguishable from sitting exactly at 6.5%, consistent with this being a
+closed-form approximation rather than an exact alpha-preserving method).
+
+**Trigger-position shift:** naive triggers were front-loaded toward early
+checkpoints (25, 21, 13 at positions 1-3); corrected triggers shifted
+almost entirely to late checkpoints (0, 0, 1 at positions 1-3; 13 at
+position 10) — direct evidence the correction targets the intended
+mechanism (early-look noise), not merely a uniform threshold reduction.
+
+## 5. Known Limitations (Sequential Testing)
+
+- The alpha-spending schedule uses the standard closed-form
+  O'Brien-Fleming-style APPROXIMATION, not the exact Lan-DeMets spending
+  function — exact alpha preservation (hitting precisely 5.0%) is not
+  guaranteed, and the measured 6.6% reflects this.
+- Checkpoints are evenly spaced (fixed increments of 200). Real experiments
+  often check at irregular intervals; this configuration is not validated.
+- sequential_check() (applying the schedule to a live experiment's stored
+  checkpoint history) is unit-tested but not exercised against real
+  simulator-generated + database-persisted checkpoint data end-to-end.
