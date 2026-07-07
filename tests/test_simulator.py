@@ -44,7 +44,8 @@ def test_covariate_correlation_within_sampling_noise(n_users, baseline_rate, tar
     flaking on ordinary resampling variance, tight enough to catch structural bias.
     """
     sim = ExperimentSimulator(
-        n_users=n_users, baseline_rate=baseline_rate, true_effect=0.0, covariate_correlation=target_corr, seed=7
+        n_users=n_users, baseline_rate=baseline_rate, true_effect=0.0,
+        covariate_correlation=target_corr, seed=7,
     )
     _, _, _, gt = sim.generate()
 
@@ -79,7 +80,9 @@ def test_negative_correlation_infeasible_target_raises_cleanly():
 
 
 def test_zero_correlation_is_exact_shortcut():
-    sim = ExperimentSimulator(n_users=2000, baseline_rate=0.1, true_effect=0.0, covariate_correlation=0.0, seed=1)
+    sim = ExperimentSimulator(
+        n_users=2000, baseline_rate=0.1, true_effect=0.0, covariate_correlation=0.0, seed=1
+    )
     _, _, _, gt = sim.generate()
     assert gt.calibrated_slope == 0.0
 

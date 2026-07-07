@@ -12,13 +12,12 @@ that core/inference.py's own unit tests could never catch, since those were
 tested only against hand-built numpy arrays with no database involved.
 """
 import numpy as np
-from core.inference import cuped_adjust, variance_reduction_pct
 import pandas as pd
 import pytest
 from sqlalchemy import text
 
 from core.data_access import get_inference_data, get_variant_counts, split_by_variant
-from core.inference import cuped_adjust, raw_ttest_ci
+from core.inference import cuped_adjust, raw_ttest_ci, variance_reduction_pct
 from core.validity import srm_check
 from data_sim.simulator import ExperimentSimulator
 from db.connection import get_engine, init_schema, reset_engine

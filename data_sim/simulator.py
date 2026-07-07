@@ -28,10 +28,29 @@ assumed up front — see inline comments at each site for the specific evidence:
    correlation, either increase baseline_rate (moves the operating point away
    from sigmoid's most saturated region) or treat it as explicitly out of
    scope and choose a smaller-magnitude target.
+5. PERFORMANCE: _calibrate()'s answer depends ONLY on (baseline_rate,
+   covariate_correlation_target) — never on the experiment's own seed or
+   n_users. It is cached process-wide (_CALIBRATION_CACHE) keyed on that
+   pair. Before this cache existed, calibration was recomputed from scratch
+   on every single generate() call — measured at ~0.7s per call for a
+   nonzero correlation target (vs ~0.007s at correlation=0.0's exact
+   shortcut), a 100x gap driven by the iterative brentq root-finding. At
+   scale (e.g. validation/test_cuped_variance_reduction.py's 400 repeated
+   calls at fixed correlation values) this made a single validation test
+   run for 5+ minutes. Caching also removes an unintended coupling: the
+   calibration RNG previously used seed+1 (the experiment's own seed offset
+   by one), meaning two experiments sharing the same target correlation but
+   different seeds got slightly different calibrated (intercept, slope) —
+   noise that served no purpose, since calibration is meant to find one good
+   answer for a given target, not vary per experiment. The cache's internal
+   seed is now derived deterministically from the (baseline_rate, target)
+   pair itself, independent of any specific experiment's seed — the same
+   target always calibrates to the same answer, regardless of call order.
 """
 
 from __future__ import annotations
 
+import hashlib
 from datetime import datetime, timedelta
 from typing import Callable
 
@@ -57,6 +76,26 @@ _COVARIATE_LOGNORMAL_SIGMA = 0.75
 _BRACKET_INITIAL_HALFWIDTH = 2.0
 _BRACKET_MAX_EXPANSIONS = 12
 
+# Process-wide cache: (baseline_rate, covariate_correlation_target) -> the
+# full 4-tuple _calibrate() returns. See module docstring point 5 — the
+# calibration answer is a pure function of this key, never of an
+# experiment's own seed, so caching is both a valid speedup and a
+# determinism improvement (removes seed-dependent calibration noise that
+# served no purpose).
+_CALIBRATION_CACHE: dict[tuple[float, float], tuple[float, float, float, float]] = {}
+
+
+def _deterministic_calibration_seed(baseline_rate: float, target_corr: float) -> int:
+    """
+    A fixed, reproducible seed derived only from the calibration target —
+    NOT from any experiment's own seed. Using a hash (rather than e.g.
+    int(baseline_rate * 1000)) avoids collisions between distinct targets
+    that happen to round similarly, while staying fully deterministic
+    across runs and machines.
+    """
+    combined = f"{baseline_rate:.10f}_{target_corr:.10f}"
+    return int(hashlib.sha256(combined.encode()).hexdigest(), 16) % (2**32)
+
 
 class ExperimentSimulator:
     def __init__(
@@ -73,7 +112,9 @@ class ExperimentSimulator:
         if not (0.0 < baseline_rate < 1.0):
             raise ValueError(f"baseline_rate must be in (0,1), got {baseline_rate}")
         if not (-0.99 < covariate_correlation < 0.99):
-            raise ValueError(f"covariate_correlation must be in (-0.99, 0.99), got {covariate_correlation}")
+            raise ValueError(
+                f"covariate_correlation must be in (-0.99, 0.99), got {covariate_correlation}"
+            )
         if segment_heterogeneity and len(segment_heterogeneity) > 1:
             raise ValueError(
                 "Only one segment column may carry configured heterogeneity per generate() call."
@@ -106,7 +147,9 @@ class ExperimentSimulator:
 
         p_final = p_baseline.copy()
         is_treatment = variant == "treatment"
-        p_final[is_treatment] = np.clip(p_baseline[is_treatment] + effect_per_user[is_treatment], 0.0, 1.0)
+        p_final[is_treatment] = np.clip(
+            p_baseline[is_treatment] + effect_per_user[is_treatment], 0.0, 1.0
+        )
 
         converted = rng.binomial(1, p_final)
 
@@ -150,7 +193,9 @@ class ExperimentSimulator:
         device_type = rng.choice(DEVICE_TYPES, size=self.n_users, p=DEVICE_PROBS)
         region = rng.choice(REGIONS, size=self.n_users, p=REGION_PROBS)
         existing_customer = rng.random(self.n_users) < EXISTING_CUSTOMER_PROB
-        pre_period_covariate = rng.lognormal(mean=0.0, sigma=_COVARIATE_LOGNORMAL_SIGMA, size=self.n_users)
+        pre_period_covariate = rng.lognormal(
+            mean=0.0, sigma=_COVARIATE_LOGNORMAL_SIGMA, size=self.n_users
+        )
         signup_date = (datetime(2025, 1, 1) - timedelta(days=1)).date()
 
         return pd.DataFrame({
@@ -202,6 +247,10 @@ class ExperimentSimulator:
         """
         Jointly solves (intercept, slope) via DAMPED alternating 1D root-finds.
 
+        Cached process-wide by (baseline_rate, covariate_correlation_target)
+        — see module docstring point 5. Cache lookup happens before any of
+        the expensive root-finding machinery below runs.
+
         Includes a degenerate-variance guard in corr_gap: at extreme (a, b)
         combinations, sigmoid(a + b*x) saturates near 0 or 1 for the ENTIRE
         calibration sample, producing a constant y with zero variance —
@@ -221,7 +270,12 @@ class ExperimentSimulator:
         if abs(self.covariate_correlation_target) < 1e-9:
             return base_intercept, 0.0, 0.0, self.baseline_rate
 
-        calib_rng = np.random.default_rng(self.seed + 1)
+        cache_key = (self.baseline_rate, self.covariate_correlation_target)
+        if cache_key in _CALIBRATION_CACHE:
+            return _CALIBRATION_CACHE[cache_key]
+
+        calib_seed = _deterministic_calibration_seed(*cache_key)
+        calib_rng = np.random.default_rng(calib_seed)
         raw = calib_rng.lognormal(mean=0.0, sigma=_COVARIATE_LOGNORMAL_SIGMA, size=_CALIBRATION_N)
         x = self._standardize(raw)
         u = calib_rng.random(_CALIBRATION_N)
@@ -248,7 +302,9 @@ class ExperimentSimulator:
 
         for _ in range(_JOINT_CALIBRATION_ITERS):
             try:
-                slope_solve = brentq(lambda b: corr_gap(intercept, b), slope_lo, slope_hi, xtol=1e-4)
+                slope_solve = brentq(
+                    lambda b: corr_gap(intercept, b), slope_lo, slope_hi, xtol=1e-4
+                )
             except ValueError as exc:
                 raise ValueError(
                     f"Could not calibrate slope for target correlation="
@@ -266,7 +322,9 @@ class ExperimentSimulator:
         final_corr_gap = corr_gap(intercept, slope)
         final_mean_gap = mean_gap(intercept, slope)
 
-        if abs(final_corr_gap) > _CALIBRATION_CONVERGENCE_TOL or abs(final_mean_gap) > _CALIBRATION_CONVERGENCE_TOL:
+        corr_not_converged = abs(final_corr_gap) > _CALIBRATION_CONVERGENCE_TOL
+        mean_not_converged = abs(final_mean_gap) > _CALIBRATION_CONVERGENCE_TOL
+        if corr_not_converged or mean_not_converged:
             raise RuntimeError(
                 f"Calibration did NOT converge after {_JOINT_CALIBRATION_ITERS} damped iterations: "
                 f"corr_gap={final_corr_gap:+.4f}, mean_gap={final_mean_gap:+.4f} "
@@ -278,7 +336,9 @@ class ExperimentSimulator:
 
         realized_corr = final_corr_gap + self.covariate_correlation_target
         realized_mean = final_mean_gap + self.baseline_rate
-        return intercept, slope, realized_corr, realized_mean
+        result = (intercept, slope, realized_corr, realized_mean)
+        _CALIBRATION_CACHE[cache_key] = result
+        return result
 
     def _assign_variant(self, rng: np.random.Generator) -> np.ndarray:
         treatment_prob = self.corrupted_split if self.corrupted_split is not None else 0.5

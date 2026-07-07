@@ -14,13 +14,11 @@ previous tests checked ONE number against ONE target. This checks a RATE
 about long-run procedure behavior, not about any single interval.
 """
 
-import numpy as np
 import pytest
 
 from core.data_access import get_inference_data, split_by_variant
 from core.inference import raw_ttest_ci
-from data_sim.simulator import ExperimentSimulator
-from db.connection import get_engine, init_schema, reset_engine
+from db.connection import get_engine, reset_engine
 from db.seed import seed_database
 
 N_SIMULATIONS = 1000

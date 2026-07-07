@@ -6,7 +6,7 @@ purity constraint.
 import numpy as np
 import pytest
 
-from core.inference import raw_ttest_ci, cuped_adjust, variance_reduction_pct
+from core.inference import cuped_adjust, raw_ttest_ci, variance_reduction_pct
 
 
 def test_raw_ttest_recovers_known_effect():
@@ -56,7 +56,8 @@ def test_raw_ttest_unequal_variance_does_not_crash_and_uses_welch_df():
 
     result = raw_ttest_ci(control, treatment)
     pooled_df = 200 + 200 - 2  # 398
-    assert result.degrees_freedom < pooled_df * 0.7  # Welch's df shrinks hard under variance imbalance
+    # Welch's df shrinks hard under variance imbalance
+    assert result.degrees_freedom < pooled_df * 0.7
 
 
 def test_raw_ttest_insufficient_observations_raises():

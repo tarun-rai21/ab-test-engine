@@ -88,8 +88,12 @@ def test_persistence_is_idempotent_not_duplicating(isolated_db):
     Same idempotency principle as db/seed.py's delete-then-insert.
     """
     engine = isolated_db
-    persist_inference_result(engine, "exp_p", "conversion", _make_inference_result(), _make_srm_result(False))
-    persist_inference_result(engine, "exp_p", "conversion", _make_inference_result(), _make_srm_result(False))
+    persist_inference_result(
+        engine, "exp_p", "conversion", _make_inference_result(), _make_srm_result(False)
+    )
+    persist_inference_result(
+        engine, "exp_p", "conversion", _make_inference_result(), _make_srm_result(False)
+    )
 
     count = engine.connect().execute(
         text("SELECT COUNT(*) FROM experiment_results WHERE experiment_id = 'exp_p'")

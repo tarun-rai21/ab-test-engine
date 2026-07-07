@@ -1,10 +1,9 @@
 """
 tests/test_validity.py — closed-form and structural tests for core/validity.py.
 """
-import numpy as np
 import pytest
 
-from core.validity import srm_check, required_sample_size, mde_curve
+from core.validity import mde_curve, required_sample_size, srm_check
 
 
 def test_srm_perfectly_balanced_not_flagged():

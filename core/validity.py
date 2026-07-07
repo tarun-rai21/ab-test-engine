@@ -176,7 +176,8 @@ def mde_curve(
     max_mde = (1.0 - baseline_rate) * 0.999  # p2 must stay < 1
 
     def n_gap(mde: float, target_n: int) -> float:
-        return required_sample_size(baseline_rate, mde, alpha, power).required_n_per_variant - target_n
+        result = required_sample_size(baseline_rate, mde, alpha, power)
+        return result.required_n_per_variant - target_n
 
     mdes = []
     for target_n in n_values:
