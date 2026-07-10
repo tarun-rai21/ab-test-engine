@@ -10,6 +10,17 @@ both an InferenceResult and an SRMResult as separate explicit arguments before
 writing to experiment_results. This preserves the spec's four-independent-
 modules architecture (Section 4.1) — core/inference.py's correctness is
 therefore completely testable without ever touching core/validity.py.
+
+HARDENING NOTE (added while building core/pipeline.py's tests): all three
+"is this degenerate" guards below now check for NaN explicitly, not just
+exact zero. A NaN variance/standard-error (e.g. from an all-NULL covariate
+column read back from SQL as NaN) previously slipped past `if x == 0:`
+entirely, since NaN == 0 is False in Python/NumPy — the NaN then propagated
+silently through cuped_adjust() -> variance_reduction_pct() -> raw_ttest_ci()
+-> persist_inference_result(), surfacing only as a confusing SQLite
+IntegrityError three function calls away from the actual cause. Caught by a
+test that (correctly) exercised a NULL pre_period_covariate value; fixed
+here at the source rather than only in the test.
 """
 
 from __future__ import annotations
@@ -74,10 +85,11 @@ def raw_ttest_ci(
     se_sq = var1 / n1 + var2 / n2
     se = np.sqrt(se_sq)
 
-    if se == 0:
+    if se == 0 or np.isnan(se):  # HARDENED: NaN now caught, not just exact zero
         raise ValueError(
-            "Standard error is zero — both groups have zero variance. "
-            "Cannot compute a meaningful CI; check for degenerate/constant input."
+            "Standard error is zero or NaN — both groups may have zero variance, "
+            "or the input contains missing/NaN values. Cannot compute a "
+            "meaningful CI; check for degenerate/constant/missing input."
         )
 
     df = se_sq**2 / ((var1 / n1) ** 2 / (n1 - 1) + (var2 / n2) ** 2 / (n2 - 1))
@@ -143,8 +155,11 @@ def cuped_adjust(y: np.ndarray, x: np.ndarray) -> CupedAdjustment:
         raise ValueError(f"y and x must have equal length, got {len(y)} and {len(x)}")
 
     var_x = x.var(ddof=1)
-    if var_x == 0:
-        raise ValueError("Covariate x has zero variance — cannot compute theta (division by zero).")
+    if var_x == 0 or np.isnan(var_x):  # HARDENED: NaN now caught, not just exact zero
+        raise ValueError(
+            "Covariate x has zero variance or contains NaN — cannot compute theta. "
+            "Check for a constant covariate or missing pre_period_covariate values."
+        )
 
     cov_xy = np.cov(y, x, ddof=1)[0, 1]
     theta = cov_xy / var_x
@@ -170,7 +185,10 @@ def variance_reduction_pct(y_raw: np.ndarray, y_cuped: np.ndarray) -> float:
     var_raw = np.asarray(y_raw, dtype=float).var(ddof=1)
     var_cuped = np.asarray(y_cuped, dtype=float).var(ddof=1)
 
-    if var_raw == 0:
-        raise ValueError("Raw variance is zero — variance reduction is undefined.")
+    if var_raw == 0 or np.isnan(var_raw):  # HARDENED: NaN now caught, not just exact zero
+        raise ValueError(
+            "Raw variance is zero or NaN — variance reduction is undefined. "
+            "Check for constant or missing input."
+        )
 
     return float(100 * (1 - var_cuped / var_raw))

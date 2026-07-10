@@ -129,3 +129,41 @@ def split_by_variant(
             f"matches '{{experiment_id}}{control_suffix}' / '{{experiment_id}}{treatment_suffix}'."
         )
     return control_df, treatment_df
+
+
+def get_sequential_checkpoints(engine: Engine, experiment_id: str) -> list[dict]:
+    """
+    Returns every stored checkpoint row for this experiment, shaped exactly
+    as core.sequential.sequential_check() expects: a list of dicts, each
+    with 'cumulative_n' and 'p_value_at_check' keys.
+
+    This is the query nothing in the codebase used before Phase 5's
+    orchestration layer (core/pipeline.py) — sequential_check() had only
+    ever been exercised against hand-built dicts in tests, never a real
+    sequential_checkpoints row, a gap explicitly flagged (and left open) in
+    Phase 5's own documentation.
+
+    Returns an EMPTY list, not an error, when no checkpoints exist yet.
+    Unlike get_variant_counts/get_inference_data — where zero rows signals a
+    missing or misconfigured experiment — zero sequential_checkpoints rows
+    is the NORMAL state for most experiments (they simply haven't been
+    peeked at yet). Raising here would make the common case an error.
+    Ordered by cumulative_n for readability only; sequential_check() never
+    trusts list order regardless, since it always finds the latest
+    checkpoint explicitly by cumulative_n.
+    """
+    query = text(
+        """
+        SELECT cumulative_n, p_value_at_check
+        FROM sequential_checkpoints
+        WHERE experiment_id = :experiment_id
+        ORDER BY cumulative_n
+        """
+    )
+    with engine.connect() as conn:
+        rows = conn.execute(query, {"experiment_id": experiment_id}).fetchall()
+
+    return [
+        {"cumulative_n": int(row.cumulative_n), "p_value_at_check": float(row.p_value_at_check)}
+        for row in rows
+    ]
