@@ -79,6 +79,7 @@ def simulate_peeking_fpr(
     naive_alpha: float = 0.05,
     threshold_schedule: tuple[float, ...] | None = None,
     seed: int = 2024,
+    checkpoint_ns: list[int] | None = None,
 ) -> PeekingSimulationResult:
     """
     Simulates n_simulations independent NULL-EFFECT experiments, checking at
@@ -95,11 +96,51 @@ def simulate_peeking_fpr(
     implementations (one naive, one corrected) risk silently diverging over
     time, the same failure shape as this project's Phase 2 split_pct bug,
     where two conceptually-linked quantities lived in separate code paths.
+
+    checkpoint_ns: optional list of EXPLICIT cumulative sample sizes for
+    each checkpoint (e.g. [120, 300, 550, 700, 1000, 1250, 1500, 1650, 1800,
+    2000] for irregular, real-world-style spacing — daily checks with
+    uneven traffic), overriding the default UNIFORM spacing derived from
+    checkpoint_n * (index+1). Must be strictly increasing with length
+    n_checkpoints. When omitted, behavior is byte-for-byte identical to
+    every prior call site (fully backward-compatible) — this closes the
+    "checkpoints are evenly spaced... irregular real-world checkpoint
+    timing is not validated" limitation flagged since Phase 5, without
+    changing default behavior for anything already calling this function.
+
+    NOTE ON THE SCHEDULE ITSELF: alpha_spending_schedule()'s z_k =
+    z_final*sqrt(K/k) formula is INDEX-based (checkpoint COUNT k out of K),
+    not information-based (actual cumulative_n ratio). The classical
+    O'Brien-Fleming design technically uses the information-accrual ratio,
+    which equals the look-count ratio only under EQUAL spacing. Under
+    irregular spacing (checkpoint_ns provided), this function still applies
+    the same index-based schedule — it does not attempt an information-
+    based redesign. This measures whether that existing approximation still
+    controls FPR adequately under irregular spacing, not whether a more
+    sophisticated schedule would do better (out of scope here, and
+    documented as such in validation/test_peeking_inflation.py).
     """
     if n_checkpoints < 1:
         raise ValueError(f"n_checkpoints must be >= 1, got {n_checkpoints}")
     if not (0.0 < baseline_rate < 1.0):
         raise ValueError(f"baseline_rate must be in (0,1), got {baseline_rate}")
+
+    if checkpoint_ns is not None:
+        if len(checkpoint_ns) != n_checkpoints:
+            raise ValueError(
+                f"checkpoint_ns length ({len(checkpoint_ns)}) must equal "
+                f"n_checkpoints ({n_checkpoints})"
+            )
+        if list(checkpoint_ns) != sorted(set(checkpoint_ns)):
+            raise ValueError(
+                f"checkpoint_ns must be strictly increasing with no duplicates, "
+                f"got {checkpoint_ns}"
+            )
+        cumulative_sizes = list(checkpoint_ns)
+        total_n = cumulative_sizes[-1]
+    else:
+        cumulative_sizes = [(k + 1) * checkpoint_n for k in range(n_checkpoints)]
+        total_n = n_checkpoints * checkpoint_n
 
     if threshold_schedule is None:
         threshold_schedule = tuple([naive_alpha] * n_checkpoints)
@@ -110,7 +151,6 @@ def simulate_peeking_fpr(
         )
 
     rng = np.random.default_rng(seed)
-    total_n = n_checkpoints * checkpoint_n
 
     triggered_count = 0
     trigger_checkpoint_counts = [0] * n_checkpoints
@@ -121,7 +161,7 @@ def simulate_peeking_fpr(
 
         triggered_this_sim = False
         for checkpoint_idx in range(n_checkpoints):
-            cumulative_n = (checkpoint_idx + 1) * checkpoint_n
+            cumulative_n = cumulative_sizes[checkpoint_idx]
             control_slice = control[:cumulative_n]
             treatment_slice = treatment[:cumulative_n]
 

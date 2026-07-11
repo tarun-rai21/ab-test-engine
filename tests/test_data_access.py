@@ -18,7 +18,7 @@ from sqlalchemy import text
 
 from core.data_access import get_inference_data, get_variant_counts, split_by_variant
 from core.inference import cuped_adjust, raw_ttest_ci, variance_reduction_pct
-from core.validity import srm_check
+from core.validity import mde_curve, required_sample_size, srm_check
 from data_sim.simulator import ExperimentSimulator
 from db.connection import get_engine, init_schema, reset_engine
 from db.seed import coerce_for_sqlite, seed_database
@@ -325,4 +325,59 @@ def test_full_pipeline_cuped_variance_reduction_matches_theory(isolated_db):
         f"3pp — the Var(Y_cuped)=Var(Y)(1-rho^2) identity should hold "
         f"regardless of Y being binary, since it's a generic OLS-optimal-"
         f"theta property, not a normality assumption."
+    )
+
+# ===================================================================== #
+# INTEGRATION GAP CLOSURE — required_sample_size() / mde_curve() against
+# real seeded data. Deferred since Phase 2 as low-risk (both take plain
+# floats, no DB/JOIN logic to break) — closed here now that
+# core/pipeline.py's analyze_experiment() actually wires mde_curve() to a
+# REALIZED baseline rate in production, so the wiring deserves its own
+# direct test rather than only being exercised incidentally through the
+# pipeline's own tests.
+# ===================================================================== #
+
+def test_mde_curve_matches_manual_calc_on_real_seeded_data(isolated_db):
+    """
+    Feeds the REALIZED control baseline rate from a real simulated + seeded
+    experiment into mde_curve(), exactly as core/pipeline.py's
+    analyze_experiment() does in production, then cross-checks the result
+    by feeding the resulting achievable MDE back into
+    required_sample_size() — since mde_curve() is required_sample_size()'s
+    numerically-solved inverse (via brentq), the round trip should recover
+    approximately the original n_per_variant.
+
+    This is the specific "real data" wiring Phase 2 deferred: not that the
+    math itself was ever in doubt (already proven via
+    test_required_sample_size_matches_hand_derivation in test_validity.py),
+    but that a REALIZED baseline_rate pulled from actual DB-seeded data —
+    which will never be a round number like 0.10 — flows through cleanly.
+    """
+    config = {"simulator": {
+        "n_users": 4000, "baseline_rate": 0.12, "true_effect": 0.0,
+        "covariate_correlation": 0.0, "seed": 200, "corrupted_split": None,
+    }}
+    seed_database(config, database_url="sqlite:///:memory:")
+
+    df = get_inference_data(get_engine(), "exp_seed200")
+    control_df, treatment_df = split_by_variant(df)
+
+    baseline_rate_realized = float(control_df["converted"].mean())
+    n_per_variant = min(len(control_df), len(treatment_df))
+
+    assert baseline_rate_realized != 0.12, (
+        "This test needs a REALIZED rate that differs from the round "
+        "configured value to actually exercise real-data wiring — if this "
+        "assertion itself fails, the seed happened to land on an exact "
+        "match; change the seed, don't delete the check."
+    )
+
+    achievable_mde = mde_curve(baseline_rate_realized, [n_per_variant])[0]
+
+    back_check = required_sample_size(baseline_rate_realized, achievable_mde)
+    assert back_check.required_n_per_variant == pytest.approx(n_per_variant, rel=0.02), (
+        f"Round-trip mismatch: mde_curve() at n={n_per_variant} gave "
+        f"mde={achievable_mde:.4f}, but required_sample_size() at that mde "
+        f"requires n={back_check.required_n_per_variant} — these should be "
+        f"each other's inverse within brentq's solve tolerance."
     )

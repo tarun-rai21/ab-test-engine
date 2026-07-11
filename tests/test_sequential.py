@@ -120,6 +120,40 @@ def test_simulate_peeking_fpr_determinism():
     assert r1.checkpoint_trigger_counts == r2.checkpoint_trigger_counts
 
 
+def test_simulate_peeking_fpr_checkpoint_ns_matches_equivalent_uniform_case():
+    """
+    checkpoint_ns=[200, 400, 600] describes EXACTLY the same cumulative
+    sample sizes as the default uniform checkpoint_n=200, n_checkpoints=3
+    case — the two calling styles must produce byte-identical results at
+    the same seed, proving checkpoint_ns doesn't silently change anything
+    when it happens to describe a uniform schedule.
+    """
+    uniform = simulate_peeking_fpr(n_simulations=20, n_checkpoints=3, checkpoint_n=200, seed=11)
+    explicit = simulate_peeking_fpr(
+        n_simulations=20, n_checkpoints=3, checkpoint_n=200,
+        checkpoint_ns=[200, 400, 600], seed=11,
+    )
+    assert uniform.empirical_fpr == explicit.empirical_fpr
+    assert uniform.checkpoint_trigger_counts == explicit.checkpoint_trigger_counts
+
+
+def test_simulate_peeking_fpr_checkpoint_ns_wrong_length_raises():
+    with pytest.raises(ValueError):
+        simulate_peeking_fpr(
+            n_simulations=10, n_checkpoints=5, checkpoint_ns=[100, 200, 300],
+        )
+
+
+def test_simulate_peeking_fpr_checkpoint_ns_not_strictly_increasing_raises():
+    with pytest.raises(ValueError):
+        simulate_peeking_fpr(
+            n_simulations=10, n_checkpoints=3, checkpoint_ns=[200, 200, 600],
+        )
+    with pytest.raises(ValueError):
+        simulate_peeking_fpr(
+            n_simulations=10, n_checkpoints=3, checkpoint_ns=[400, 200, 600],  # out of order
+        )
+
 # --------------------------------------------------------------------- #
 # sequential_check — structural tests
 # --------------------------------------------------------------------- #
