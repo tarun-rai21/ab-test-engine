@@ -65,49 +65,43 @@ measured by actually running the code, not asserted from theory.
 
 ```mermaid
 flowchart TB
-    subgraph DataLayer["Data Layer"]
-        SIM["Data Simulator<br/>data_sim/simulator.py"]
-        GT["GroundTruth<br/>data_sim/ground_truth.py"]
-        DB[("SQLite / Postgres<br/>db/schema.sql")]
-        SIM -->|"generates known-truth data"| GT
-        SIM -->|"seed_database()"| DB
-    end
+    SIM["Data Simulator<br/>data_sim/simulator.py"]
+    GT["GroundTruth<br/>data_sim/ground_truth.py"]
+    DB[("SQLite / Postgres<br/>db/schema.sql")]
+    SIM --> GT
+    SIM -->|seed_database| DB
 
-    DATAACCESS["Data Access Layer<br/>core/data_access.py<br/>(the ONLY file with raw SQL)"]
-    DB -->|"queries"| DATAACCESS
+    DATAACCESS["Data Access Layer<br/>core/data_access.py"]
+    DB --> DATAACCESS
 
-    subgraph CoreEngine["Core Engine — four independently-tested modules"]
-        VALIDITY["Validity Checker<br/>core/validity.py<br/>SRM, power, MDE"]
-        INFERENCE["Statistical Core<br/>core/inference.py<br/>Welch's t-test, CUPED"]
-        SEQUENTIAL["Sequential Engine<br/>core/sequential.py<br/>peeking FPR, alpha-spending"]
-        SEGMENTS["Segment Analysis<br/>core/segments.py<br/>BH correction, Simpson's-paradox flag"]
-    end
+    VALIDITY["Validity Checker<br/>core/validity.py"]
+    INFERENCE["Statistical Core<br/>core/inference.py"]
+    SEQUENTIAL["Sequential Engine<br/>core/sequential.py"]
+    SEGMENTS["Segment Analysis<br/>core/segments.py"]
 
     DATAACCESS --> VALIDITY
     DATAACCESS --> INFERENCE
-    DATAACCESS -.->|"get_sequential_checkpoints()"| SEQUENTIAL
+    DATAACCESS --> SEQUENTIAL
     DATAACCESS --> SEGMENTS
 
-    PIPELINE["Orchestration Layer<br/>core/pipeline.py<br/>analyze_experiment()"]
+    PIPELINE["Orchestration Layer<br/>core/pipeline.py"]
     VALIDITY --> PIPELINE
     INFERENCE --> PIPELINE
     SEQUENTIAL --> PIPELINE
     SEGMENTS --> PIPELINE
 
-    PERSIST["Persistence<br/>core/persistence.py<br/>trusted-tagging, idempotent writes"]
+    PERSIST["Persistence<br/>core/persistence.py"]
     PIPELINE --> PERSIST
     PERSIST --> DB
 
-    VALIDATION["Validation Harness<br/>validation/*.py<br/>proves claims against known truth"]
-    GT -.->|"checks recovered effect<br/>vs. known truth"| VALIDATION
-    INFERENCE -.-> VALIDATION
-    SEQUENTIAL -.-> VALIDATION
-    SEGMENTS -.-> VALIDATION
+    VALIDATION["Validation Harness<br/>validation/*.py"]
+    GT -.-> VALIDATION
+    PIPELINE -.-> VALIDATION
 
-    API["FastAPI Service<br/>api/main.py<br/>4 endpoints, auto-docs at /docs"]
-    APP["Streamlit Report App<br/>app/streamlit_app.py<br/>5-panel single-page report"]
-    PIPELINE -->|"called directly"| API
-    PIPELINE -->|"called directly"| APP
+    API["FastAPI Service<br/>api/main.py"]
+    APP["Streamlit App<br/>app/streamlit_app.py"]
+    PIPELINE --> API
+    PIPELINE --> APP
 ```
 
 The dashed box (Core Engine) is deliberate: each of its four modules is pure,
