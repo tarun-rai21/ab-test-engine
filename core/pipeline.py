@@ -2,15 +2,16 @@
 core/pipeline.py — the orchestration layer implementing spec Section 4.4's
 full analysis sequence end to end: SRM -> power/MDE context -> raw effect
 estimate -> optional CUPED effect estimate -> optional sequential-peeking
-check -> (segments, deferred to Phase 6) -> one assembled AnalysisReport.
+check -> optional segment analysis -> one assembled AnalysisReport.
 
 WHY THIS FILE EXISTS: every module it calls (core/validity.py,
-core/inference.py, core/sequential.py, core/persistence.py,
-core/data_access.py) has been independently, thoroughly tested in isolation
-since Phase 2. None of them had ever been run together, end to end, for a
-single experiment, until this file — a real gap explicitly identified while
-auditing Phases 1-5: nothing in the codebase owned the actual product
-surface (what a future Streamlit app or API endpoint would call).
+core/inference.py, core/sequential.py, core/segments.py,
+core/persistence.py, core/data_access.py) has been independently,
+thoroughly tested in isolation. None of them had ever been run together,
+end to end, for a single experiment, until this file — a real gap
+explicitly identified while auditing Phases 1-5: nothing in the codebase
+owned the actual product surface (what a future Streamlit app or API
+endpoint would call).
 
 DESIGN DECISIONS, made explicit here rather than left implicit in code:
 
@@ -41,16 +42,29 @@ DESIGN DECISIONS, made explicit here rather than left implicit in code:
    checkpoint rows exist yet, sequential_risk is simply None in the report.
    This is a real, honest schema gap surfaced here, not papered over.
 
-5. Segments are hardcoded to None. Phase 6 (core/segments.py) does not
-   exist yet. The field stays in AnalysisReport so that adding Phase 6
-   later extends the report without changing its existing shape.
+5. Segment analysis (Phase 6) is optional, driven by an explicit
+   segment_columns parameter — one SegmentAnalysisResult per requested
+   column, or None if no columns were requested. Uses the RAW (not CUPED)
+   pooled point estimate as the Simpson's-paradox reference — matches the
+   spec exactly (core/segments.py's segment_breakdown() reuses
+   raw_ttest_ci() per segment, mirroring the pooled raw effect, not the
+   CUPED-adjusted one). Each segment's persisted row uses
+   "{segment_column}:{segment_value}" as its segment key (e.g.
+   "device_type:mobile"), not just the bare value — this avoids result_id
+   collisions if two different segment_columns happen to share a value
+   string (e.g. a device_type and a region that happen to both be "US").
+
+   segment_columns is also passed straight through to
+   get_inference_data()'s own segment_columns parameter (Step 1's change)
+   — if no segments were requested, we pass an empty list so the query
+   doesn't fetch columns nobody asked for; if specific segments were
+   requested, only those are fetched.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
 
-import numpy as np
 from sqlalchemy import Engine
 
 from core.data_access import (
@@ -61,6 +75,7 @@ from core.data_access import (
 )
 from core.inference import InferenceResult, cuped_adjust, raw_ttest_ci, variance_reduction_pct
 from core.persistence import persist_inference_result
+from core.segments import SegmentAnalysisResult, segment_breakdown
 from core.sequential import SequentialCheckResult, sequential_check
 from core.validity import SRMResult, mde_curve, srm_check
 
@@ -75,7 +90,7 @@ class AnalysisReport:
     cuped_effect: InferenceResult | None
     cuped_variance_reduction_pct: float | None
     sequential_risk: SequentialCheckResult | None
-    segments: None                     # Phase 6, not yet implemented — see module docstring
+    segments: tuple[SegmentAnalysisResult, ...] | None  # None if segment_columns not requested
 
 
 def analyze_experiment(
@@ -85,19 +100,31 @@ def analyze_experiment(
     use_cuped: bool = True,
     n_checkpoints_planned: int | None = None,
     checkpoint_n: int | None = None,
+    segment_columns: list[str] | None = None,
     persist: bool = True,
 ) -> AnalysisReport:
     """
     Runs the full spec Section 4.4 sequence for one experiment and returns a
-    single AnalysisReport. Persists both the raw and (if computed) CUPED
-    effect estimates via core.persistence.persist_inference_result(), unless
-    persist=False (useful for pure computation in tests, or a caller that
-    wants to inspect a report before committing it).
+    single AnalysisReport. Persists the raw, (if computed) CUPED, and (if
+    requested) per-segment effect estimates via
+    core.persistence.persist_inference_result(), unless persist=False
+    (useful for pure computation in tests, or a caller that wants to
+    inspect a report before committing it).
 
     n_checkpoints_planned / checkpoint_n: pass BOTH to enable the sequential-
     peeking check against this experiment's real sequential_checkpoints
     rows. Omit either (or both) to skip it — see design decision 4 above for
     why this can't be inferred automatically from the schema as it stands.
+
+    segment_columns: pass a list of column names from
+    core.data_access.ALLOWED_SEGMENT_COLUMNS (e.g. ["device_type",
+    "region"]) to run Benjamini-Hochberg-corrected, Simpson's-paradox-
+    flagged segment analysis for each. Omit (None) to skip entirely
+    (segments=None in the report, and no segment columns are even fetched
+    from the database). A failure analyzing one requested column (e.g.
+    every segment in that column had insufficient data) does not take down
+    the others or the rest of the report — same fault-tolerance pattern as
+    achievable_mde and CUPED above.
 
     Raises ValueError if the experiment has no seeded variants or no
     assignment data at all (propagated from get_variant_counts /
@@ -108,7 +135,12 @@ def analyze_experiment(
     observed_counts, expected_ratios = get_variant_counts(engine, experiment_id)
     srm_result = srm_check(observed_counts, expected_ratios)
 
-    df = get_inference_data(engine, experiment_id)
+    # Only fetch the segment columns actually requested — an empty list
+    # when none are, per get_inference_data()'s own segment_columns
+    # contract (Step 1).
+    df = get_inference_data(
+        engine, experiment_id, segment_columns=segment_columns or []
+    )
     control_df, treatment_df = split_by_variant(df)
 
     raw_control = control_df["converted"].to_numpy(dtype=float)
@@ -165,6 +197,32 @@ def analyze_experiment(
                 checkpoints, n_checkpoints_planned, checkpoint_n
             )
 
+    # --- Segment analysis (Phase 6): optional, see design decision 5.
+    segments: tuple[SegmentAnalysisResult, ...] | None = None
+    if segment_columns:
+        segment_results = []
+        for column in segment_columns:
+            try:
+                analysis = segment_breakdown(
+                    df, column, pooled_point_estimate=raw_effect.point_estimate
+                )
+            except ValueError:
+                # This ONE column's segment analysis failed (e.g. every
+                # segment value had insufficient data) — skip it, don't
+                # take down the rest of the report or the other columns.
+                continue
+
+            segment_results.append(analysis)
+
+            if persist:
+                for segment_result in analysis.segments:
+                    persist_inference_result(
+                        engine, experiment_id, metric_name, segment_result.inference,
+                        srm_result, segment=f"{column}:{segment_result.segment_value}",
+                    )
+
+        segments = tuple(segment_results) if segment_results else None
+
     return AnalysisReport(
         experiment_id=experiment_id,
         metric_name=metric_name,
@@ -174,5 +232,5 @@ def analyze_experiment(
         cuped_effect=cuped_effect,
         cuped_variance_reduction_pct=cuped_vr,
         sequential_risk=sequential_risk,
-        segments=None,
+        segments=segments,
     )

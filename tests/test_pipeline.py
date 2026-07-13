@@ -1,7 +1,7 @@
 """
 tests/test_pipeline.py — end-to-end tests for core/pipeline.py, the
-orchestration layer tying validity, inference, sequential, and persistence
-together for a single experiment.
+orchestration layer tying validity, inference, sequential, segments, and
+persistence together for a single experiment.
 
 This file has a second job beyond testing pipeline.py itself: it is what
 officially closes the gap flagged (and left open) throughout Phase 5's
@@ -359,10 +359,16 @@ def test_sequential_check_skipped_without_planned_params(isolated_db):
 
 
 # ===================================================================== #
-# Segments — explicitly deferred, must not silently produce something
+# Phase 6 — segment analysis wiring
 # ===================================================================== #
 
-def test_segments_field_is_always_none_pending_phase_6(isolated_db):
+def test_segments_field_is_none_when_no_segment_columns_requested(isolated_db):
+    """
+    Renamed from test_segments_field_is_always_none_pending_phase_6 now
+    that Phase 6 (core/segments.py) exists — this now tests the correct,
+    ongoing behavior: segments stays None when segment_columns simply
+    isn't passed, not that segment analysis is unimplemented.
+    """
     config = {"simulator": {
         "n_users": 2000, "baseline_rate": 0.10, "true_effect": 0.0,
         "covariate_correlation": 0.0, "seed": 122, "corrupted_split": None,
@@ -371,3 +377,103 @@ def test_segments_field_is_always_none_pending_phase_6(isolated_db):
 
     report = analyze_experiment(get_engine(), "exp_seed122")
     assert report.segments is None
+
+
+def test_segment_analysis_recovers_heterogeneous_effect_and_flags_simpsons(
+    isolated_db,
+):
+    """
+    THE Phase 6 recovery proof: on a simulator-generated dataset with
+    deliberately configured segment_heterogeneity (mobile: +0.15,
+    desktop: -0.08), a genuinely positive pooled effect emerges (mobile's
+    larger population share and larger magnitude dominate), while desktop
+    shows a clear NEGATIVE effect that disagrees with the pooled sign.
+
+    Expected shape: both segments statistically significant post-BH-
+    correction (real effects, large n=20000), and the sign-disagreeing
+    segment (desktop) correctly flagged while the sign-agreeing one
+    (mobile) is not.
+    """
+    engine = isolated_db
+    config = {"simulator": {
+        "n_users": 20000, "baseline_rate": 0.10, "true_effect": 0.0,
+        "covariate_correlation": 0.0, "seed": 500, "corrupted_split": None,
+        "segment_heterogeneity": {"device_type": {"mobile": 0.15, "desktop": -0.08}},
+    }}
+    seed_database(config, database_url="sqlite:///:memory:")
+
+    report = analyze_experiment(engine, "exp_seed500", segment_columns=["device_type"])
+
+    assert report.segments is not None
+    assert len(report.segments) == 1
+    device_analysis = report.segments[0]
+    assert device_analysis.segment_column == "device_type"
+    assert device_analysis.excluded_segments == ()
+
+    by_value = {s.segment_value: s for s in device_analysis.segments}
+    assert set(by_value.keys()) == {"mobile", "desktop"}
+
+    assert by_value["mobile"].inference.point_estimate > 0.05
+    assert by_value["mobile"].bh_significant is True
+    assert by_value["mobile"].simpsons_flag is False
+
+    assert by_value["desktop"].inference.point_estimate < 0
+    assert by_value["desktop"].bh_significant is True
+    assert by_value["desktop"].simpsons_flag is True
+
+    # 4 persisted rows: pooled raw, pooled cuped, and 2 segment rows —
+    # each segment row tagged "device_type:<value>", confirmed by direct
+    # query rather than assumed.
+    rows = engine.connect().execute(
+        text(
+            "SELECT method, segment FROM experiment_results "
+            "WHERE experiment_id = 'exp_seed500'"
+        )
+    ).fetchall()
+    assert len(rows) == 4
+    segment_tags = {r.segment for r in rows if r.segment is not None}
+    assert segment_tags == {"device_type:mobile", "device_type:desktop"}
+
+
+def test_analyze_experiment_multiple_segment_columns(isolated_db):
+    """
+    Requesting multiple segment_columns (device_type AND region) must
+    produce one SegmentAnalysisResult per requested column, not just the
+    first — proving the loop over segment_columns is wired correctly, not
+    just a single-column happy path.
+    """
+    engine = isolated_db
+    config = {"simulator": {
+        "n_users": 8000, "baseline_rate": 0.10, "true_effect": 0.02,
+        "covariate_correlation": 0.0, "seed": 501, "corrupted_split": None,
+    }}
+    seed_database(config, database_url="sqlite:///:memory:")
+
+    report = analyze_experiment(
+        engine, "exp_seed501", segment_columns=["device_type", "region"]
+    )
+
+    assert report.segments is not None
+    assert len(report.segments) == 2
+    columns_seen = {s.segment_column for s in report.segments}
+    assert columns_seen == {"device_type", "region"}
+
+
+def test_analyze_experiment_persist_false_does_not_write_segment_rows(isolated_db):
+    engine = isolated_db
+    config = {"simulator": {
+        "n_users": 5000, "baseline_rate": 0.10, "true_effect": 0.0,
+        "covariate_correlation": 0.0, "seed": 502, "corrupted_split": None,
+        "segment_heterogeneity": {"device_type": {"mobile": 0.10, "desktop": 0.0}},
+    }}
+    seed_database(config, database_url="sqlite:///:memory:")
+
+    report = analyze_experiment(
+        engine, "exp_seed502", segment_columns=["device_type"], persist=False
+    )
+
+    assert report.segments is not None  # still computed
+    count = engine.connect().execute(
+        text("SELECT COUNT(*) FROM experiment_results WHERE experiment_id = 'exp_seed502'")
+    ).fetchone()[0]
+    assert count == 0

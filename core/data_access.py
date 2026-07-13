@@ -15,6 +15,16 @@ from __future__ import annotations
 import pandas as pd
 from sqlalchemy import Engine, text
 
+# The ONLY column names get_inference_data() will ever accept as a segment
+# dimension. This exists specifically as a security boundary: SQL column
+# names CANNOT be safely bound as query parameters the way values can
+# (SQLAlchemy's :param binding only escapes VALUES, never identifiers), so
+# any caller-supplied column name must be checked against this fixed list
+# BEFORE it is ever interpolated into a query string. Extending segment
+# analysis to a new dimension (e.g. "marketing_channel") means adding it
+# here — and nowhere else needs to change.
+ALLOWED_SEGMENT_COLUMNS = ("device_type", "region", "existing_customer")
+
 
 def get_variant_counts(engine: Engine, experiment_id: str) -> tuple[list[int], list[float]]:
     """
@@ -57,17 +67,48 @@ def get_variant_counts(engine: Engine, experiment_id: str) -> tuple[list[int], l
     return observed_counts, expected_ratios
 
 
-def get_inference_data(engine: Engine, experiment_id: str) -> pd.DataFrame:
+def get_inference_data(
+    engine: Engine,
+    experiment_id: str,
+    segment_columns: list[str] | None = None,
+) -> pd.DataFrame:
     """
-    Returns one row per user: user_id, variant_id, pre_period_covariate, converted.
+    Returns one row per user: user_id, variant_id, pre_period_covariate,
+    converted, plus whichever segment columns were requested.
+
+    segment_columns controls which optional segment dimensions (from
+    ALLOWED_SEGMENT_COLUMNS) are included:
+      - None (default): include ALL allow-listed columns — this preserves
+        the function's original behavior exactly, so every existing caller
+        that doesn't pass this argument sees no change at all.
+      - [] (empty list): include NONE of them — used when no segment
+        analysis was requested for this call, avoiding an unnecessary
+        fetch of columns nobody asked for.
+      - a specific list, e.g. ["device_type"]: include only those columns.
+
+    SECURITY NOTE: segment_columns feeds into the SQL SELECT and GROUP BY
+    clauses as column NAMES, not values — something SQLAlchemy's :param
+    binding cannot protect, since bind parameters only escape values, never
+    identifiers. Every requested name is validated against
+    ALLOWED_SEGMENT_COLUMNS and rejected immediately if it isn't a member,
+    BEFORE anything is interpolated into the query string. This is the same
+    "validate untrusted input before use" discipline already applied
+    elsewhere in this project (core.validity.srm_check's length/sum
+    checks, ExperimentSimulator's covariate_correlation bounds check) —
+    applied here specifically because dynamic column names are a genuine
+    SQL-injection surface that a naive implementation would open up.
 
     NAMING/SCOPING NOTE: this function is deliberately scoped to expose ONLY
-    pre_period_covariate as the covariate column — never a post-treatment
+    pre_period_covariate as the COVARIATE column — never a post-treatment
     events-table value. core.inference.cuped_adjust() has an unenforceable
     precondition that its covariate input must be pre-treatment; this
     function is the structural (not just documented) defense against that —
     any future need for a DIFFERENT covariate must be a separately-named,
     separately-reviewed function, not a new column silently added here.
+    The segment columns above are NOT covariates in that sense — they are
+    static, pre-treatment SEGMENT dimensions (for Phase 6's
+    core/segments.py), not values CUPED adjusts against, so their presence
+    here does not weaken that guarantee.
 
     FAN-OUT DEFENSE: aggregation via GROUP BY + CASE WHEN COUNT(...)>0
     collapses any number of matching event rows per user into a single
@@ -80,9 +121,26 @@ def get_inference_data(engine: Engine, experiment_id: str) -> pd.DataFrame:
     multiply a user's row for each matching event, corrupting every
     downstream count and effect estimate without any error being raised.
     """
+    if segment_columns is None:
+        columns_to_fetch = list(ALLOWED_SEGMENT_COLUMNS)
+    else:
+        invalid = [c for c in segment_columns if c not in ALLOWED_SEGMENT_COLUMNS]
+        if invalid:
+            raise ValueError(
+                f"Invalid segment_columns {invalid} — must be a subset of "
+                f"ALLOWED_SEGMENT_COLUMNS {ALLOWED_SEGMENT_COLUMNS}."
+            )
+        columns_to_fetch = list(segment_columns)
+
+    # Safe to build this way: columns_to_fetch is now GUARANTEED to be a
+    # subset of the fixed ALLOWED_SEGMENT_COLUMNS tuple above, never raw
+    # caller input — the validation above is what makes this f-string safe.
+    segment_select = "".join(f", u.{col}" for col in columns_to_fetch)
+    segment_group_by = "".join(f", u.{col}" for col in columns_to_fetch)
+
     query = text(
-        """
-        SELECT u.user_id, a.variant_id, u.pre_period_covariate,
+        f"""
+        SELECT u.user_id, a.variant_id, u.pre_period_covariate{segment_select},
                CASE WHEN COUNT(e.event_id) > 0 THEN 1 ELSE 0 END AS converted
         FROM assignments a
         JOIN users u ON a.user_id = u.user_id
@@ -90,7 +148,7 @@ def get_inference_data(engine: Engine, experiment_id: str) -> pd.DataFrame:
             ON e.user_id = a.user_id AND e.experiment_id = a.experiment_id
             AND e.event_type = 'conversion'
         WHERE a.experiment_id = :experiment_id
-        GROUP BY u.user_id, a.variant_id, u.pre_period_covariate
+        GROUP BY u.user_id, a.variant_id, u.pre_period_covariate{segment_group_by}
         ORDER BY u.user_id
         """
     )
