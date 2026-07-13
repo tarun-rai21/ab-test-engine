@@ -24,7 +24,6 @@ import pytest
 from sqlalchemy import text
 
 from core.pipeline import analyze_experiment
-from data_sim.simulator import ExperimentSimulator
 from db.connection import get_engine, init_schema, reset_engine
 from db.seed import seed_database
 

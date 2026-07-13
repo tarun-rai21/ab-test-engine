@@ -33,9 +33,9 @@ import pandas as pd
 import yaml
 from sqlalchemy import text
 
+from data_sim.ground_truth import GroundTruth
 from data_sim.simulator import ExperimentSimulator
 from db.connection import get_engine, init_schema
-from data_sim.ground_truth import GroundTruth
 
 CONFIG_PATH = Path(__file__).resolve().parent.parent / "config" / "default_config.yaml"
 

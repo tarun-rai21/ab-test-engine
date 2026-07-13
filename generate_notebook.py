@@ -19,16 +19,18 @@ from pathlib import Path
 
 
 def md(*lines: str) -> dict:
-    return {"cell_type": "markdown", "metadata": {}, "source": [l + "\n" for l in lines[:-1]] + [lines[-1]] if lines else []}
+    source = [line + "\n" for line in lines[:-1]] + [lines[-1]] if lines else []
+    return {"cell_type": "markdown", "metadata": {}, "source": source}
 
 
 def code(*lines: str) -> dict:
+    source = [line + "\n" for line in lines[:-1]] + [lines[-1]] if lines else []
     return {
         "cell_type": "code",
         "execution_count": None,
         "metadata": {},
         "outputs": [],
-        "source": [l + "\n" for l in lines[:-1]] + [lines[-1]] if lines else [],
+        "source": source,
     }
 
 
@@ -117,25 +119,30 @@ cells = [
     code(
         "print('--- Raw ---')",
         "print(f'Point estimate: {report.raw_effect.point_estimate:+.4f}')",
-        "print(f'95% CI: [{report.raw_effect.ci_lower:.4f}, {report.raw_effect.ci_upper:.4f}]')",
+        "print(f'95% CI: [{report.raw_effect.ci_lower:.4f}, '",
+        "      f'{report.raw_effect.ci_upper:.4f}]')",
         "print(f'p-value: {report.raw_effect.p_value:.4g}')",
         "",
         "print('\\n--- CUPED ---')",
         "print(f'Point estimate: {report.cuped_effect.point_estimate:+.4f}')",
-        "print(f'95% CI: [{report.cuped_effect.ci_lower:.4f}, {report.cuped_effect.ci_upper:.4f}]')",
+        "print(f'95% CI: [{report.cuped_effect.ci_lower:.4f}, '",
+        "      f'{report.cuped_effect.ci_upper:.4f}]')",
         "print(f'p-value: {report.cuped_effect.p_value:.4g}')",
         "print(f'\\nVariance reduction from CUPED: {report.cuped_variance_reduction_pct:.1f}%')",
     ),
     code(
         "fig, ax = plt.subplots(figsize=(7, 2))",
-        "for y, (label, result) in enumerate([('Raw', report.raw_effect), ('CUPED', report.cuped_effect)]):",
+        "results = [('Raw', report.raw_effect), ('CUPED', report.cuped_effect)]",
+        "for y, (label, result) in enumerate(results):",
         "    ax.plot([result.ci_lower, result.ci_upper], [y, y], color='steelblue', linewidth=3)",
         "    ax.plot(result.point_estimate, y, 'o', color='steelblue', markersize=8)",
         "ax.axvline(0, color='gray', linestyle='--')",
-        "ax.set_yticks([0, 1]); ax.set_yticklabels(['Raw', 'CUPED'])",
+        "ax.set_yticks([0, 1])",
+        "ax.set_yticklabels(['Raw', 'CUPED'])",
         "ax.set_xlabel('Effect estimate (treatment - control)')",
         "ax.set_title('95% confidence intervals: raw vs. CUPED')",
-        "plt.tight_layout(); plt.show()",
+        "plt.tight_layout()",
+        "plt.show()",
     ),
     md(
         "## 4. The peeking problem — why checking results repeatedly is dangerous",
@@ -157,10 +164,10 @@ cells = [
         "    threshold_schedule=schedule, seed=2024,",
         ")",
         "",
-        "print(f'Naive empirical false-positive rate:     {naive.empirical_fpr:.1%}  (nominal target: 5%)')",
-        "print(f'Alpha-spending corrected FPR:             {corrected.empirical_fpr:.1%}')",
-        "print(f'\\nNaive trigger positions (by checkpoint):     {naive.checkpoint_trigger_counts}')",
-        "print(f'Corrected trigger positions (by checkpoint): {corrected.checkpoint_trigger_counts}')",
+        "print(f'Naive empirical FPR: {naive.empirical_fpr:.1%}  (nominal target: 5%)')",
+        "print(f'Alpha-spending corrected FPR: {corrected.empirical_fpr:.1%}')",
+        "print(f'\\nNaive trigger positions: {naive.checkpoint_trigger_counts}')",
+        "print(f'Corrected trigger positions: {corrected.checkpoint_trigger_counts}')",
     ),
     md(
         "Notice where the triggers happen: naive triggers are front-loaded "
@@ -211,9 +218,6 @@ cells = [
         "heterogeneous effect** and flags the segment that disagrees in "
         "direction with the pooled result — a real Simpson's-paradox catch.",
         "",
-        "Full technical documentation for every phase, every design "
-        "decision, and every bug found along the way is available in the "
-        "project's `Phase_*_Documentation.md` files and `README.md`.",
     ),
 ]
 
