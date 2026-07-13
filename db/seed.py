@@ -35,6 +35,7 @@ from sqlalchemy import text
 
 from data_sim.simulator import ExperimentSimulator
 from db.connection import get_engine, init_schema
+from data_sim.ground_truth import GroundTruth
 
 CONFIG_PATH = Path(__file__).resolve().parent.parent / "config" / "default_config.yaml"
 
@@ -171,3 +172,78 @@ def seed_database(config: dict, database_url: str | None = None) -> None:
 if __name__ == "__main__":
     cfg = load_config()
     seed_database(cfg)
+
+def seed_assignments_for_existing_experiment(
+    experiment_id: str,
+    sim_cfg: dict,
+    database_url: str | None = None,
+) -> "GroundTruth":
+    """
+    Generates synthetic users/assignments/events for an experiment whose
+    experiments/variants rows ALREADY EXIST — e.g. created via the API's
+    POST /experiments endpoint (Phase 7).
+
+    Unlike seed_database(), which creates the experiment + variants + data
+    all together in one atomic call (this project's original dev-fixture
+    workflow, used throughout Phases 1-6's tests and left completely
+    unchanged here), this function assumes the experiment and its variants
+    were already created separately, and only generates + inserts the
+    DATA — matching the API's two-step create-then-assign flow described
+    in the original spec's Section 7.7.
+
+    experiment_id is passed through to ExperimentSimulator's own
+    experiment_id override parameter, so generated variant_ids
+    (f"{experiment_id}_control" / f"{experiment_id}_treatment") line up
+    automatically with whatever variants POST /experiments already created
+    for this same id, using the exact naming convention fixed since Phase 1.
+
+    Only clears assignments/events for THIS experiment_id before inserting
+    (not experiments/variants, which this function does not own) — same
+    idempotency reasoning as seed_database()'s own _delete_existing_experiment,
+    scoped down to just the tables this function is responsible for.
+    """
+    if database_url:
+        os.environ["DATABASE_URL"] = database_url
+
+    sim = ExperimentSimulator(
+        n_users=sim_cfg["n_users"],
+        baseline_rate=sim_cfg["baseline_rate"],
+        true_effect=sim_cfg["true_effect"],
+        covariate_correlation=sim_cfg.get("covariate_correlation", 0.5),
+        seed=sim_cfg.get("seed", 42),
+        corrupted_split=sim_cfg.get("corrupted_split"),
+        segment_heterogeneity=sim_cfg.get("segment_heterogeneity"),
+        experiment_id=experiment_id,
+    )
+    users_df, assignments_df, events_df, ground_truth = sim.generate()
+
+    engine = get_engine()
+
+    with engine.begin() as conn:
+        # Scoped to just this function's own tables — experiments/variants
+        # are owned by whichever call created them, not by this function.
+        conn.execute(
+            text("DELETE FROM assignments WHERE experiment_id = :eid"),
+            {"eid": experiment_id},
+        )
+        conn.execute(
+            text("DELETE FROM events WHERE experiment_id = :eid"),
+            {"eid": experiment_id},
+        )
+
+    users_df = coerce_for_sqlite(users_df)
+    assignments_df = coerce_for_sqlite(assignments_df)
+    events_df = coerce_for_sqlite(events_df)
+
+    with engine.begin() as conn:
+        existing_user_ids = pd.read_sql(
+            text("SELECT user_id FROM users"), conn
+        )["user_id"].tolist()
+        new_users = users_df[~users_df["user_id"].isin(existing_user_ids)]
+
+        if not new_users.empty:
+            new_users.to_sql("users", conn, if_exists="append", index=False)
+        assignments_df.to_sql("assignments", conn, if_exists="append", index=False)
+        events_df.to_sql("events", conn, if_exists="append", index=False)
+
+    return ground_truth
