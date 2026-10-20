@@ -134,7 +134,7 @@ def test_summary_includes_segment_line_when_heterogeneity_configured():
     When segment heterogeneity IS configured, the summary must surface
     the segment column name plus both configured and realized per-segment
     effects — this is the evidence a reviewer needs to confirm Phase 6's
-    Simpson's-paradox scenario was actually set up as intended.
+    effect-reversal scenario was actually set up as intended.
     """
     gt = _make_ground_truth(
         segment_column="device_type",

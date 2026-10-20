@@ -2,15 +2,15 @@
 
 Structural enforcement of correct experimentation methodology — SRM detection,
 power analysis, CUPED variance reduction, empirical peeking-inflation
-correction, and BH-corrected Simpson's-paradox-aware segment analysis —
+correction, and BH-corrected segment analysis that flags effect reversals —
 validated against synthetic data with known ground truth, not asserted from
 a single run. Exposed both as a Python library, a REST API, and an
 interactive report app.
 
-> **Status:** Phases 0–8 complete — statistical core, orchestration layer,
-> segment analysis, FastAPI service, and Streamlit report app all built,
-> tested, and validated. Phase 9 (this document, notebook writeup,
-> packaging) in progress.
+> **Status:** complete. A full audit and the fixes it led to are recorded
+> in [`docs/REVIEW.md`](docs/REVIEW.md) — including a miscalibrated
+> peeking correction and a cross-experiment data-mixing bug, both fixed
+> and covered by regression tests.
 
 ## Quick start
 
@@ -52,7 +52,7 @@ Naive `p < 0.05` A/B testing fails in four specific, well-documented ways:
   rate far above the nominal 5%, invisibly.
 - **Sample ratio mismatch (SRM)** — a broken randomization pipeline can
   silently invalidate every downstream statistic.
-- **Simpson's paradox / effect heterogeneity** — an aggregate null can mask
+- **Effect heterogeneity** — an aggregate result can mask
   a strong effect in one segment and the opposite effect in another.
 
 This engine makes the relevant checks mandatory and ordered, computes what
@@ -114,7 +114,7 @@ happen incorrectly — `trusted` is computed from the SRM result internally,
 never accepted as a caller-supplied argument.
 
 **API and Streamlit both call `core/pipeline.py` directly**, not each other
-— a deliberate choice (documented in `Phase_8_Documentation.md`) favoring
+— a deliberate choice (documented in `app/streamlit_app.py`) favoring
 simplicity for a local demo tool over an unnecessary HTTP round-trip.
 
 ## Project structure
@@ -124,8 +124,8 @@ ab-test-engine/
 ├── core/
 │   ├── validity.py       # SRM chi-square check, power/MDE calculator
 │   ├── inference.py      # Welch's t-test, CUPED adjustment, variance reduction
-│   ├── sequential.py     # peeking-FPR simulation, alpha-spending correction
-│   ├── segments.py       # per-segment effect estimation, BH correction, Simpson's-paradox flag
+│   ├── sequential.py     # peeking-FPR simulation, calibrated O'Brien-Fleming boundary
+│   ├── segments.py       # per-segment effects, BH correction, effect-reversal flag
 │   ├── persistence.py    # the only writer of experiment_results.trusted
 │   ├── data_access.py    # the only file with raw SQL
 │   └── pipeline.py       # orchestration: ties the above into one report
@@ -147,7 +147,7 @@ ab-test-engine/
 │   └── components/         # 5 panels: upload_or_generate, validity, effect, sequential, segment
 ├── tests/                # fast, closed-form/structural tests (pytest -m "not slow")
 ├── validation/           # slow, simulation-based proof (release gate, not per-commit)
-├── notebooks/            # narrative walkthrough (Phase 9)
+├── notebooks/            # narrative walkthrough (regenerate: python generate_notebook.py)
 ├── config/
 └── scripts/
 ```
@@ -167,23 +167,32 @@ Measured by actually running `validation/*.py`, not asserted — see
 | CUPED variance reduction @ ρ=0.7, null effect | ≈49.0% | **48.67%** | Same config. |
 | CUPED variance reduction, nonzero true effect | ≈25.0% | **23.87%** | Real, documented ~1pp systematic shift from effect-application mechanics — see validation file docstring. |
 | CUPED variance reduction, continuous metric | ≈36.0% | **35.94%** | Proves the identity is metric-agnostic, not binary-only. |
-| Naive peeking empirical FPR | 20%–35% | **22.0%** (110/500) | 10 checkpoints × 200/arm, flat α=0.05. |
-| Alpha-spending corrected FPR | ~4%–6.5% | **6.6%** (33/500) | Identical data (common random numbers). |
-| Corrected FPR under irregular checkpoint spacing | Must beat naive | **6.8%** vs naive **21.4%** | Uneven daily-style spacing; no meaningful degradation vs. even spacing. |
-| Segment recovery (deliberately heterogeneous) | Correct sign, magnitude within noise | **Mobile: +0.147** (configured +0.15); **Desktop: -0.070** (configured -0.08) | Simpson's-paradox flag correctly fired on the disagreeing segment. |
+| Naive peeking empirical FPR | ~19.3% (theory) | **19.95%** (399/2000) | 10 checkpoints × 200/arm, flat α=0.05. |
+| O'Brien-Fleming corrected FPR | 5% (band 3.5%–7%) | **5.15%** (103/2000) | Calibrated constant c=2.0865; identical data (common random numbers). |
+| Corrected FPR under irregular checkpoint spacing | Must beat naive | **4.80%** vs naive **20.45%** | Uneven daily-style spacing; no meaningful degradation vs. even spacing. |
+| Segment recovery (deliberately heterogeneous) | Correct sign, magnitude within noise | **Mobile: +0.147** (configured +0.15); **Desktop: -0.070** (configured -0.08) | Effect-reversal flag correctly fired on the significantly opposite segment. |
 
 The naive→corrected trigger-position shift (naive triggers front-loaded at
-early checkpoints; corrected triggers shifted almost entirely to the final
-checkpoint) is direct evidence the correction targets the intended failure
-mode — early-look noise — not just a uniform threshold reduction.
+early checkpoints; corrected triggers essentially never at the first looks
+and concentrated late) is direct evidence the correction targets the
+intended failure mode — early-look noise — not just a uniform threshold
+reduction.
+
+An earlier version of the boundary used c = 1.96 instead of a calibrated
+constant; its exact false-positive rate is ~6.9%, and it measured 6.6% at
+500 simulations. See `docs/REVIEW.md` (issue H2) for how this was found
+and fixed.
 
 ## Known limitations (stated directly, not discovered later)
 
-- The alpha-spending schedule is the standard closed-form O'Brien-Fleming
-  **approximation**, not the exact Lan–DeMets spending function, and remains
+- The O'Brien-Fleming boundary's constant is calibrated exactly (recursive
+  numerical integration) for **equally spaced** looks. It remains
   **index-based** (checkpoint count) rather than information-based (actual
-  sample-size ratio) even under irregular spacing — validated to still work
-  well in practice, but not a first-principles redesign.
+  sample-size ratio) — validated empirically under one irregular schedule
+  (4.80%), but a Lan–DeMets spending function would remove the assumption.
+- Segment analysis tests each segment's effect against zero (BH-corrected
+  within each segment column); it has no formal interaction test for
+  whether segment effects differ from each other.
 - `core/pipeline.py`'s sequential-peeking check is genuinely optional: the
   schema has no column storing an experiment's *planned* checkpoint schedule
   (`n_checkpoints_planned`, `checkpoint_n`), so these must be supplied by the

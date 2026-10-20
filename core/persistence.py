@@ -102,3 +102,32 @@ def persist_inference_result(
         )
 
     return result_id
+
+
+def persist_srm_result(engine: Engine, experiment_id: str, srm_result: SRMResult) -> None:
+    """
+    Writes the experiment's latest SRM check to srm_checks (one row per
+    experiment, replaced on re-analysis — same delete-then-insert
+    idempotency as persist_inference_result). The table existed in the
+    schema from Phase 0 but nothing ever wrote to it (review issue L4).
+    """
+    with engine.begin() as conn:
+        conn.execute(
+            text("DELETE FROM srm_checks WHERE experiment_id = :eid"),
+            {"eid": experiment_id},
+        )
+        conn.execute(
+            text(
+                """
+                INSERT INTO srm_checks (experiment_id, chi_sq_stat, p_value, flagged, checked_at)
+                VALUES (:eid, :chi_sq, :p_value, :flagged, :checked_at)
+                """
+            ),
+            {
+                "eid": experiment_id,
+                "chi_sq": srm_result.chi_sq_stat,
+                "p_value": srm_result.p_value,
+                "flagged": int(srm_result.flagged),
+                "checked_at": datetime.now(timezone.utc).isoformat(),
+            },
+        )

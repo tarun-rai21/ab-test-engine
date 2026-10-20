@@ -302,8 +302,8 @@ def test_sequential_check_against_real_persisted_checkpoints(isolated_db):
 
     assert report.sequential_risk is not None, (
         "sequential_risk was None — get_sequential_checkpoints() likely "
-        "isn't reading the real table, or the >1-row gate in analyze_experiment "
-        "is misfiring."
+        "isn't reading the real table, or the checkpoint gate in "
+        "analyze_experiment is misfiring."
     )
     assert report.sequential_risk.checkpoint_position == 4
     assert report.sequential_risk.naive_significant is True
@@ -311,11 +311,12 @@ def test_sequential_check_against_real_persisted_checkpoints(isolated_db):
     assert report.sequential_risk.disagreement is True
 
 
-def test_sequential_check_skipped_with_zero_or_one_checkpoint(isolated_db):
+def test_sequential_check_skipped_with_zero_checkpoints_but_runs_on_first(isolated_db):
     """
-    Zero checkpoints (the normal, common state) and exactly one checkpoint
-    (no repeated-look risk to flag yet) must both leave sequential_risk=None
-    — the >1-row gate documented in core/pipeline.py's design decision 4.
+    Zero checkpoints (the normal, common state) leaves sequential_risk=None.
+    A single checkpoint IS evaluated (review issue D3): the first look is
+    the most noise-prone one, so p=0.03 at position 1 of 10 must be flagged
+    as a naive/corrected disagreement rather than skipped.
     """
     engine = isolated_db
     config = {"simulator": {
@@ -333,7 +334,9 @@ def test_sequential_check_skipped_with_zero_or_one_checkpoint(isolated_db):
     report_one = analyze_experiment(
         engine, "exp_seed99", n_checkpoints_planned=10, checkpoint_n=200
     )
-    assert report_one.sequential_risk is None
+    assert report_one.sequential_risk is not None
+    assert report_one.sequential_risk.checkpoint_position == 1
+    assert report_one.sequential_risk.disagreement is True
 
 
 def test_sequential_check_skipped_without_planned_params(isolated_db):
@@ -378,7 +381,7 @@ def test_segments_field_is_none_when_no_segment_columns_requested(isolated_db):
     assert report.segments is None
 
 
-def test_segment_analysis_recovers_heterogeneous_effect_and_flags_simpsons(
+def test_segment_analysis_recovers_heterogeneous_effect_and_flags_reversal(
     isolated_db,
 ):
     """
@@ -414,11 +417,11 @@ def test_segment_analysis_recovers_heterogeneous_effect_and_flags_simpsons(
 
     assert by_value["mobile"].inference.point_estimate > 0.05
     assert by_value["mobile"].bh_significant is True
-    assert by_value["mobile"].simpsons_flag is False
+    assert by_value["mobile"].reversal_flag is False
 
     assert by_value["desktop"].inference.point_estimate < 0
     assert by_value["desktop"].bh_significant is True
-    assert by_value["desktop"].simpsons_flag is True
+    assert by_value["desktop"].reversal_flag is True
 
     # 4 persisted rows: pooled raw, pooled cuped, and 2 segment rows —
     # each segment row tagged "device_type:<value>", confirmed by direct
@@ -476,3 +479,82 @@ def test_analyze_experiment_persist_false_does_not_write_segment_rows(isolated_d
         text("SELECT COUNT(*) FROM experiment_results WHERE experiment_id = 'exp_seed502'")
     ).fetchone()[0]
     assert count == 0
+
+
+def test_second_experiment_in_shared_db_uses_its_own_users(isolated_db):
+    """
+    Regression test for review issue H1: every test above starts from a
+    fresh single-experiment DB, which hid that simulator user_ids were not
+    experiment-scoped. Seeding a second experiment into the same DB used to
+    skip "already existing" users, so its assignments joined to the FIRST
+    experiment's covariates and segments: CUPED variance reduction fell to
+    ~0% and a configured desktop effect of -0.08 came back positive.
+    """
+    engine = isolated_db
+    first = {"simulator": {
+        "n_users": 10000, "baseline_rate": 0.10, "true_effect": 0.0,
+        "covariate_correlation": 0.5, "seed": 1, "corrupted_split": None,
+    }}
+    second = {"simulator": {
+        "n_users": 10000, "baseline_rate": 0.10, "true_effect": 0.0,
+        "covariate_correlation": 0.5, "seed": 2, "corrupted_split": None,
+        "segment_heterogeneity": {"device_type": {"mobile": 0.15, "desktop": -0.08}},
+    }}
+    seed_database(first, database_url="sqlite:///:memory:")
+    seed_database(second, database_url="sqlite:///:memory:")
+
+    report = analyze_experiment(
+        engine, "exp_seed2", segment_columns=["device_type"], persist=False
+    )
+
+    assert report.cuped_variance_reduction_pct > 10.0
+    by_value = {s.segment_value: s for s in report.segments[0].segments}
+    assert by_value["mobile"].inference.point_estimate > 0.05
+    assert by_value["desktop"].inference.point_estimate < 0
+
+    with engine.connect() as conn:
+        n_users = conn.execute(text("SELECT COUNT(*) FROM users")).scalar()
+    assert n_users == 20000
+
+
+def test_reseeding_an_experiment_replaces_its_users(isolated_db):
+    """
+    Re-seeding the SAME experiment_id with a different n_users must not
+    keep stale user rows from the previous run (review issue H1).
+    """
+    engine = isolated_db
+    for n_users in (5000, 3000):
+        seed_database({"simulator": {
+            "n_users": n_users, "baseline_rate": 0.10, "true_effect": 0.0,
+            "covariate_correlation": 0.0, "seed": 3, "corrupted_split": None,
+        }}, database_url="sqlite:///:memory:")
+
+    with engine.connect() as conn:
+        assert conn.execute(text("SELECT COUNT(*) FROM users")).scalar() == 3000
+
+
+def test_analyze_experiment_persists_srm_check(isolated_db):
+    """
+    Review issue L4: srm_checks existed in the schema but was never
+    written. A persisted analysis now records one row per experiment
+    (replaced on re-analysis); persist=False writes nothing.
+    """
+    engine = isolated_db
+    seed_database({"simulator": {
+        "n_users": 2000, "baseline_rate": 0.10, "true_effect": 0.0,
+        "covariate_correlation": 0.0, "seed": 131, "corrupted_split": 0.6,
+    }}, database_url="sqlite:///:memory:")
+
+    analyze_experiment(engine, "exp_seed131", persist=False)
+    with engine.connect() as conn:
+        assert conn.execute(text("SELECT COUNT(*) FROM srm_checks")).scalar() == 0
+
+    report = analyze_experiment(engine, "exp_seed131")
+    analyze_experiment(engine, "exp_seed131")  # re-analysis replaces, not duplicates
+    with engine.connect() as conn:
+        rows = conn.execute(
+            text("SELECT flagged, p_value FROM srm_checks WHERE experiment_id = 'exp_seed131'")
+        ).fetchall()
+    assert len(rows) == 1
+    assert rows[0].flagged == 1 and report.srm.flagged is True
+    assert rows[0].p_value == pytest.approx(report.srm.p_value)

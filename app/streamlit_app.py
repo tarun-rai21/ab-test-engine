@@ -26,11 +26,10 @@ import streamlit as st
 from app.components.effect_panel import render_effect_panel
 from app.components.segment_panel import render_segment_panel
 from app.components.sequential_panel import render_sequential_panel
-from app.components.upload_or_generate import render_data_input
+from app.components.upload_or_generate import get_session_engine, render_data_input
 from app.components.validity_panel import render_validity_panel
 from core.data_access import ALLOWED_SEGMENT_COLUMNS, get_inference_data, split_by_variant
 from core.pipeline import analyze_experiment
-from db.connection import get_engine
 
 st.set_page_config(page_title="A/B Test Analysis Engine", layout="wide")
 
@@ -38,7 +37,7 @@ st.title("A/B Test Analysis Engine")
 st.caption(
     "Structural enforcement of correct experimentation methodology — "
     "SRM detection, CUPED variance reduction, peeking correction, and "
-    "Simpson's-paradox-aware segment analysis."
+    "effect-reversal-aware segment analysis."
 )
 
 # --------------------------------------------------------------------- #
@@ -79,11 +78,12 @@ with col3:
         "Planned checkpoints", min_value=1, value=10, disabled=not enable_sequential
     )
     checkpoint_n = st.number_input(
-        "Users per checkpoint", min_value=1, value=200, disabled=not enable_sequential
+        "Total users (both arms) per planned checkpoint",
+        min_value=1, value=400, disabled=not enable_sequential,
     )
 
 if st.button("▶️ Run analysis", type="primary"):
-    engine = get_engine()
+    engine = get_session_engine()
     try:
         report = analyze_experiment(
             engine,
@@ -115,14 +115,16 @@ st.divider()
 render_effect_panel(report.raw_effect, report.cuped_effect, report.cuped_variance_reduction_pct)
 st.divider()
 
-control_df, treatment_df = split_by_variant(get_inference_data(get_engine(), experiment_id))
+control_df, treatment_df = split_by_variant(get_inference_data(get_session_engine(), experiment_id))
 
 render_sequential_panel(
-    get_engine(),
+    get_session_engine(),
     experiment_id,
     report.sequential_risk,
     control_converted=control_df["converted"].to_numpy(dtype=float),
     treatment_converted=treatment_df["converted"].to_numpy(dtype=float),
+    n_checkpoints_planned=int(n_checkpoints_planned) if enable_sequential else None,
+    checkpoint_n=int(checkpoint_n) if enable_sequential else None,
 )
 st.divider()
 

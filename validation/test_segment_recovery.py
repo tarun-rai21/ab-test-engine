@@ -107,11 +107,10 @@ def test_segment_recovery_matches_configured_ground_truth():
             f"{MAGNITUDE_TOLERANCE} tolerance."
         )
 
-    # The Simpson's-paradox flag itself, as the spec's own Phase 6 expected
-    # output describes: whichever segment disagrees in sign with the
-    # pooled estimate must be flagged.
+    # The effect-reversal flag: whichever segment SIGNIFICANTLY disagrees in
+    # sign with the pooled estimate must be flagged.
     pooled_sign_positive = pooled_result.point_estimate > 0
     disagreeing_segment = "desktop" if pooled_sign_positive else "mobile"
     agreeing_segment = "mobile" if pooled_sign_positive else "desktop"
-    assert by_value[disagreeing_segment].simpsons_flag is True
-    assert by_value[agreeing_segment].simpsons_flag is False
+    assert by_value[disagreeing_segment].reversal_flag is True
+    assert by_value[agreeing_segment].reversal_flag is False

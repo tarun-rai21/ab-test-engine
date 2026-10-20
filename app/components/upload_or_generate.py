@@ -28,55 +28,154 @@ import uuid
 
 import pandas as pd
 import streamlit as st
-from sqlalchemy import text
+from sqlalchemy import Engine, text
 
-from db.connection import get_engine, init_schema, reset_engine
+from db.connection import create_memory_engine
 from db.seed import seed_database
 
 REQUIRED_CSV_COLUMNS = ("variant_id", "converted")
 OPTIONAL_SEGMENT_COLUMNS = ("device_type", "region", "existing_customer")
 
 
-def _fresh_session_engine():
+def get_session_engine() -> Engine:
     """
-    One fresh, in-memory SQLite database PER browser session — stored in
-    st.session_state so it survives across Streamlit's rerun-the-whole-
-    script-on-every-click model, but never shared between two different
-    users/tabs, AND CRITICALLY never shared with any persistent local
-    database file left over from other work (manual testing, other
-    sessions, etc).
+    One private, in-memory SQLite database PER browser session, stored in
+    st.session_state so it survives Streamlit's rerun-the-whole-script
+    model.
 
-    BUG FIX: the first version of this function called reset_engine() and
-    get_engine() WITHOUT ever actually setting DATABASE_URL to
-    "sqlite:///:memory:" — meaning it silently fell back to whatever
-    persistent file-based database the project defaults to. This broke
-    CUPED in a real, confusing way: db/seed.py's seed_database() skips
-    re-inserting a user_id if it already exists (a correct optimization
-    IF only one simulator config is ever seeded into a database — same
-    seed always produces identical data). Once multiple DIFFERENT configs
-    (different covariate_correlation values across different manual test
-    runs) hit the SAME persistent file, that assumption broke: a NEW
-    experiment's assignments/events were correctly regenerated, but the
-    shared users table's pre_period_covariate values were stale leftovers
-    from a PREVIOUS, unrelated run — completely uncorrelated with the
-    CURRENT run's outcomes, exactly matching the "0.0% variance reduction"
-    symptom this fix resolves. Explicitly forcing an in-memory database
-    here, matching the isolated_db fixture pattern used throughout this
-    project's own test suite since Phase 2, makes this class of bug
-    structurally impossible rather than just less likely.
+    BUG FIX (review issue L2): this used to set DATABASE_URL and call
+    reset_engine()/get_engine(), i.e. the PROCESS-WIDE singleton — so a
+    second browser session's reset disposed the first session's in-memory
+    database. Each session now owns its own engine object, and callers
+    pass it explicitly instead of reaching for get_engine().
+
+    (History: the original version of this function also forgot to set an
+    in-memory URL at all and silently wrote to the persistent local.db,
+    where stale users from earlier runs broke CUPED. That symptom's root
+    cause — user_ids not scoped to an experiment — is fixed in the
+    simulator; see review issue H1.)
     """
-    if "db_initialized" not in st.session_state:
-        import os
-        os.environ["DATABASE_URL"] = "sqlite:///:memory:"
-        reset_engine()
-        engine = get_engine()
-        init_schema(engine)
-        st.session_state["db_initialized"] = True
-    return get_engine()
+    if "engine" not in st.session_state:
+        st.session_state["engine"] = create_memory_engine()
+    return st.session_state["engine"]
 
 
 def _generate_experiment_id() -> str:
     return f"exp_{uuid.uuid4().hex[:12]}"
+
+
+def validate_upload(df: pd.DataFrame) -> list[str]:
+    """
+    Returns a list of human-readable problems with an uploaded DataFrame
+    (empty list = valid). Pure, so it is testable without Streamlit.
+    """
+    missing = [c for c in REQUIRED_CSV_COLUMNS if c not in df.columns]
+    if missing:
+        return [f"Missing required column(s): {missing}"]
+
+    errors = []
+    variant_ids = df["variant_id"].astype(str)
+    if not variant_ids.str.endswith(("_control", "_treatment")).all():
+        errors.append(
+            "Every variant_id value must end in '_control' or '_treatment' "
+            "(e.g. 'myexp_control'). Found values that don't match this pattern."
+        )
+    converted = pd.to_numeric(df["converted"], errors="coerce")
+    if converted.isna().any() or not converted.isin([0, 1]).all():
+        errors.append("Every 'converted' value must be 0 or 1 (no blanks).")
+    if "user_id" in df.columns and df["user_id"].duplicated().any():
+        errors.append("user_id values must be unique — this format is one row per user.")
+    if "pre_period_covariate" in df.columns and pd.to_numeric(
+        df["pre_period_covariate"], errors="coerce"
+    ).isna().any():
+        errors.append(
+            "pre_period_covariate must be numeric with no blanks (or omit the "
+            "column entirely to run without CUPED)."
+        )
+    return errors
+
+
+def ingest_upload(
+    engine: Engine, df: pd.DataFrame, experiment_id: str, treatment_split: float = 0.5
+) -> None:
+    """
+    Writes a validated upload (see validate_upload) into the schema as one
+    experiment. Pure database code, testable without Streamlit.
+
+    treatment_split is the INTENDED allocation, stored in variants.split_pct
+    for the SRM check. It used to be hard-coded to 0.5, so a real 90/10
+    design was falsely flagged as SRM (review issue M3).
+
+    Stored user_ids are prefixed with experiment_id: the session DB
+    persists across uploads, so a second upload reusing the same ids
+    (generated or user-supplied) would otherwise collide on users.user_id
+    or join to a previous upload's attributes (review issues H1/M3).
+    """
+    if not (0.0 < treatment_split < 1.0):
+        raise ValueError(f"treatment_split must be in (0,1), got {treatment_split}")
+
+    df = df.copy()
+    if "user_id" not in df.columns:
+        df["user_id"] = [f"{i:07d}" for i in range(len(df))]
+    df["user_id"] = [f"u_{experiment_id}_{uid}" for uid in df["user_id"]]
+    if "pre_period_covariate" not in df.columns:
+        df["pre_period_covariate"] = None
+    for col in OPTIONAL_SEGMENT_COLUMNS:
+        if col not in df.columns:
+            df[col] = None
+
+    # Whatever prefix the uploaded file's variant_id values originally had
+    # doesn't need to match experiment_id — every downstream query filters
+    # by the assignments table's own experiment_id column.
+    control_variant_id = f"{experiment_id}_control"
+    treatment_variant_id = f"{experiment_id}_treatment"
+    df["variant_id"] = [
+        control_variant_id if str(v).endswith("_control") else treatment_variant_id
+        for v in df["variant_id"]
+    ]
+    df["converted"] = pd.to_numeric(df["converted"]).astype(int)
+
+    users = pd.DataFrame({
+        "user_id": df["user_id"],
+        "signup_date": "2025-01-01",
+        "device_type": df["device_type"],
+        "region": df["region"],
+        "existing_customer": [
+            bool(v) if pd.notna(v) else None for v in df["existing_customer"]
+        ],
+        "pre_period_covariate": pd.to_numeric(df["pre_period_covariate"], errors="coerce"),
+    })
+    assignments = pd.DataFrame({
+        "user_id": df["user_id"],
+        "experiment_id": experiment_id,
+        "variant_id": df["variant_id"],
+        "assigned_at": "2025-01-01",
+    })
+    converted_ids = df.loc[df["converted"] == 1, "user_id"].reset_index(drop=True)
+    events = pd.DataFrame({
+        "event_id": [f"ev_{experiment_id}_{i:07d}" for i in range(len(converted_ids))],
+        "user_id": converted_ids,
+        "experiment_id": experiment_id,
+        "event_type": "conversion",
+        "event_timestamp": "2025-01-02",
+        "value": 1.0,
+    })
+
+    with engine.begin() as conn:
+        conn.execute(text(
+            "INSERT INTO experiments (experiment_id, name, start_date, status) "
+            "VALUES (:eid, 'Uploaded dataset', '2025-01-01', 'analyzed')"
+        ), {"eid": experiment_id})
+        conn.execute(text(
+            "INSERT INTO variants (variant_id, experiment_id, name, split_pct) VALUES "
+            "(:cvid, :eid, 'control', :cpct), (:tvid, :eid, 'treatment', :tpct)"
+        ), {
+            "cvid": control_variant_id, "tvid": treatment_variant_id, "eid": experiment_id,
+            "cpct": 1 - treatment_split, "tpct": treatment_split,
+        })
+        users.to_sql("users", conn, if_exists="append", index=False)
+        assignments.to_sql("assignments", conn, if_exists="append", index=False)
+        events.to_sql("events", conn, if_exists="append", index=False)
 
 
 def render_generate_data_form() -> str | None:
@@ -122,8 +221,6 @@ def render_generate_data_form() -> str | None:
     if not submitted:
         return None
 
-    _fresh_session_engine()
-
     config = {"simulator": {
         "n_users": int(n_users),
         "baseline_rate": float(baseline_rate),
@@ -134,12 +231,14 @@ def render_generate_data_form() -> str | None:
     }}
 
     # seed_database() derives its OWN experiment_id from the seed
-    # (f"exp_seed{seed}"), per its Phase 1 contract, unchanged here — we
-    # read back whatever id it actually used rather than generating our
-    # own, since this mode's data always comes from that deterministic
-    # naming convention.
+    # (f"exp_seed{seed}"), per its Phase 1 contract — we use the same
+    # deterministic naming convention to know which id it wrote.
     sim_experiment_id = f"exp_seed{int(seed)}"
-    seed_database(config)
+    try:
+        seed_database(config, engine=get_session_engine())
+    except (ValueError, RuntimeError) as exc:
+        st.error(f"Could not generate data for this configuration: {exc}")
+        return None
 
     st.success(f"Generated experiment: {sim_experiment_id}")
     return sim_experiment_id
@@ -154,11 +253,15 @@ def render_upload_form() -> str | None:
     st.caption(
         f"CSV must have one row per user, with columns: "
         f"{', '.join(REQUIRED_CSV_COLUMNS)} (required), plus optionally "
-        f"pre_period_covariate (needed for CUPED) and/or "
+        f"user_id, pre_period_covariate (needed for CUPED) and/or "
         f"{', '.join(OPTIONAL_SEGMENT_COLUMNS)} (for segment analysis). "
         f"variant_id values must end in '_control' or '_treatment'."
     )
 
+    treatment_split = st.number_input(
+        "Intended treatment allocation (used by the SRM check)",
+        min_value=0.01, max_value=0.99, value=0.50, step=0.01,
+    )
     uploaded_file = st.file_uploader("Choose a CSV file", type=["csv"])
     if uploaded_file is None:
         return None
@@ -169,87 +272,20 @@ def render_upload_form() -> str | None:
         st.error(f"Could not read this file as a CSV: {exc}")
         return None
 
-    missing = [c for c in REQUIRED_CSV_COLUMNS if c not in df.columns]
-    if missing:
-        st.error(f"Missing required column(s): {missing}")
+    errors = validate_upload(df)
+    if errors:
+        for error in errors:
+            st.error(error)
         return None
-
-    if not df["variant_id"].str.endswith(("_control", "_treatment")).all():
-        st.error(
-            "Every variant_id value must end in '_control' or '_treatment' "
-            "(e.g. 'myexp_control'). Found values that don't match this pattern."
-        )
-        return None
-
-    if "user_id" not in df.columns:
-        df = df.copy()
-        df["user_id"] = [f"u_{i:07d}" for i in range(len(df))]
 
     if "pre_period_covariate" not in df.columns:
         st.warning(
             "No pre_period_covariate column found — CUPED will not be "
             "available for this dataset."
         )
-        df["pre_period_covariate"] = None
 
-    for col in OPTIONAL_SEGMENT_COLUMNS:
-        if col not in df.columns:
-            df[col] = None
-
-    engine = _fresh_session_engine()
     experiment_id = _generate_experiment_id()
-    # Whatever prefix the uploaded file's variant_id values originally had
-    # doesn't need to match our newly-generated experiment_id — every
-    # downstream query filters by the assignments table's own
-    # experiment_id column, never by parsing the variant_id string itself.
-    control_variant_id = f"{experiment_id}_control"
-    treatment_variant_id = f"{experiment_id}_treatment"
-    df = df.copy()
-    df["variant_id"] = df["variant_id"].apply(
-        lambda v: control_variant_id if v.endswith("_control") else treatment_variant_id
-    )
-
-    with engine.begin() as conn:
-        conn.execute(text(
-            "INSERT INTO experiments (experiment_id, name, start_date, status) "
-            "VALUES (:eid, 'Uploaded dataset', '2025-01-01', 'analyzed')"
-        ), {"eid": experiment_id})
-        conn.execute(text(
-            "INSERT INTO variants (variant_id, experiment_id, name, split_pct) VALUES "
-            "(:cvid, :eid, 'control', 0.5), (:tvid, :eid, 'treatment', 0.5)"
-        ), {"cvid": control_variant_id, "tvid": treatment_variant_id, "eid": experiment_id})
-
-        for _, row in df.iterrows():
-            conn.execute(text(
-                "INSERT INTO users (user_id, signup_date, device_type, region, "
-                "existing_customer, pre_period_covariate) VALUES "
-                "(:uid, '2025-01-01', :device_type, :region, :existing_customer, :covariate)"
-            ), {
-                "uid": row["user_id"],
-                "device_type": row.get("device_type"),
-                "region": row.get("region"),
-                "existing_customer": (
-                    bool(row["existing_customer"])
-                    if pd.notna(row.get("existing_customer")) else None
-                ),
-                "covariate": (
-                    float(row["pre_period_covariate"])
-                    if pd.notna(row.get("pre_period_covariate")) else None
-                ),
-            })
-            conn.execute(text(
-                "INSERT INTO assignments (user_id, experiment_id, variant_id, assigned_at) "
-                "VALUES (:uid, :eid, :vid, '2025-01-01')"
-            ), {"uid": row["user_id"], "eid": experiment_id, "vid": row["variant_id"]})
-            if int(row["converted"]) == 1:
-                conn.execute(text(
-                    "INSERT INTO events (event_id, user_id, experiment_id, event_type, "
-                    "event_timestamp, value) VALUES (:evid, :uid, :eid, 'conversion', "
-                    "'2025-01-02', 1.0)"
-                ), {
-                    "evid": f"ev_{uuid.uuid4().hex[:12]}",
-                    "uid": row["user_id"], "eid": experiment_id,
-                })
+    ingest_upload(get_session_engine(), df, experiment_id, float(treatment_split))
 
     st.success(f"Ingested {len(df)} rows as experiment: {experiment_id}")
     return experiment_id

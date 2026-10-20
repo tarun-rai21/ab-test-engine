@@ -36,12 +36,35 @@ def get_engine(echo: bool = False) -> Engine:
     in-memory SQLite (":memory:") gets StaticPool so the same connection —
     and therefore the same in-memory DB — is reused across calls; without this,
     each new connection sees an empty, freshly-created database.
+
+    The singleton is keyed on DATABASE_URL: if the env var has changed since
+    the cached engine was built (e.g. seed_database(database_url=...) after
+    an engine already existed), a new engine is built for the new URL
+    instead of silently returning the old one (review issue L2).
     """
     global _engine
-    if _engine is not None:
+    url = get_database_url()
+    if _engine is not None and _engine.url.render_as_string(hide_password=False) == url:
         return _engine
 
-    url = get_database_url()
+    _engine = _build_engine(url, echo=echo)
+    return _engine
+
+
+def create_memory_engine() -> Engine:
+    """
+    A NEW, private in-memory SQLite database with the schema applied —
+    deliberately NOT the process-wide singleton. Used where each caller
+    needs its own isolated database, e.g. one per Streamlit browser
+    session (a shared singleton let one session's reset wipe another's
+    data).
+    """
+    engine = _build_engine("sqlite:///:memory:")
+    init_schema(engine)
+    return engine
+
+
+def _build_engine(url: str, echo: bool = False) -> Engine:
     connect_args: dict = {}
     engine_kwargs: dict = {"echo": echo}
 
@@ -50,8 +73,7 @@ def get_engine(echo: bool = False) -> Engine:
         if ":memory:" in url:
             engine_kwargs["poolclass"] = StaticPool
 
-    _engine = create_engine(url, connect_args=connect_args, **engine_kwargs)
-    return _engine
+    return create_engine(url, connect_args=connect_args, **engine_kwargs)
 
 
 def reset_engine() -> None:

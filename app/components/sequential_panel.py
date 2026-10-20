@@ -25,10 +25,12 @@ from sqlalchemy import text
 
 from core.data_access import get_sequential_checkpoints
 from core.inference import raw_ttest_ci
-from core.sequential import SequentialCheckResult, alpha_spending_schedule
+from core.sequential import SequentialCheckResult, alpha_spending_schedule, checkpoint_position
 
 
-def _insert_checkpoint(engine, experiment_id: str, cumulative_n: int, p_value: float) -> None:
+def _insert_checkpoint(
+    engine, experiment_id: str, cumulative_n: int, p_value: float, alpha_threshold: float
+) -> None:
     with engine.begin() as conn:
         conn.execute(
             text(
@@ -37,7 +39,7 @@ def _insert_checkpoint(engine, experiment_id: str, cumulative_n: int, p_value: f
                     (checkpoint_id, experiment_id, checked_at, cumulative_n,
                      p_value_at_check, alpha_threshold_at_check)
                 VALUES
-                    (:cid, :eid, :checked_at, :cum_n, :pval, 0.05)
+                    (:cid, :eid, :checked_at, :cum_n, :pval, :alpha)
                 """
             ),
             {
@@ -46,13 +48,25 @@ def _insert_checkpoint(engine, experiment_id: str, cumulative_n: int, p_value: f
                 "checked_at": datetime.now(timezone.utc).isoformat(),
                 "cum_n": cumulative_n,
                 "pval": p_value,
+                "alpha": alpha_threshold,
             },
         )
 
 
-def _render_trace_plot(checkpoints: list[dict]) -> None:
+def _render_trace_plot(
+    checkpoints: list[dict],
+    n_checkpoints_planned: int | None,
+    checkpoint_n: int | None,
+) -> None:
+    """
+    The corrected threshold at each logged checkpoint comes from the
+    PLANNED schedule at that checkpoint's position — the same mapping
+    sequential_check() uses for the verdict (review issue M2: this used to
+    build a schedule from the number of checkpoints logged so far, so the
+    plotted line could contradict the verdict above it). Without a planned
+    schedule, only the naive threshold is drawn.
+    """
     checkpoints_sorted = sorted(checkpoints, key=lambda c: c["cumulative_n"])
-    schedule = alpha_spending_schedule(n_checkpoints=len(checkpoints_sorted), total_alpha=0.05)
 
     xs = [c["cumulative_n"] for c in checkpoints_sorted]
     ps = [c["p_value_at_check"] for c in checkpoints_sorted]
@@ -60,7 +74,14 @@ def _render_trace_plot(checkpoints: list[dict]) -> None:
     fig, ax = plt.subplots(figsize=(6, 3))
     ax.plot(xs, ps, "o-", color="steelblue", label="Observed p-value")
     ax.axhline(0.05, color="firebrick", linestyle="--", label="Naive threshold (0.05)")
-    ax.plot(xs, schedule, "x--", color="darkorange", label="Corrected threshold")
+    if n_checkpoints_planned is not None and checkpoint_n is not None:
+        schedule = alpha_spending_schedule(n_checkpoints=n_checkpoints_planned, total_alpha=0.05)
+        thresholds = [
+            schedule[checkpoint_position(n, n_checkpoints_planned, checkpoint_n)[0] - 1]
+            for n in xs
+        ]
+        ax.plot(xs, thresholds, "x--", color="darkorange", label="Corrected threshold")
+        ax.set_yscale("log")
     ax.set_xlabel("Cumulative sample size")
     ax.set_ylabel("p-value")
     ax.set_title("Peeking history: p-value vs. significance thresholds")
@@ -76,6 +97,8 @@ def render_sequential_panel(
     sequential_risk: SequentialCheckResult | None,
     control_converted: np.ndarray,
     treatment_converted: np.ndarray,
+    n_checkpoints_planned: int | None = None,
+    checkpoint_n: int | None = None,
 ) -> None:
     st.subheader("Sequential Testing / Peeking Risk")
     st.caption(
@@ -107,7 +130,16 @@ def render_sequential_panel(
             treatment_converted[:checkpoint_n_per_arm],
         )
         cumulative_n = checkpoint_n_per_arm * 2
-        _insert_checkpoint(engine, experiment_id, cumulative_n, prefix_result.p_value)
+        # Record the threshold that actually applied at this look: the
+        # planned schedule's value at this position if a plan is set,
+        # otherwise the naive 0.05 (this used to always store 0.05).
+        alpha_threshold = 0.05
+        if n_checkpoints_planned is not None and checkpoint_n is not None:
+            position, _ = checkpoint_position(cumulative_n, n_checkpoints_planned, checkpoint_n)
+            alpha_threshold = alpha_spending_schedule(n_checkpoints_planned)[position - 1]
+        _insert_checkpoint(
+            engine, experiment_id, cumulative_n, prefix_result.p_value, alpha_threshold
+        )
         st.success(
             f"Logged checkpoint at n={cumulative_n} (n={checkpoint_n_per_arm}/arm), "
             f"p={prefix_result.p_value:.4g}. Re-run analysis to see the updated risk."
@@ -116,12 +148,10 @@ def render_sequential_panel(
 
     checkpoints = get_sequential_checkpoints(engine, experiment_id)
 
-    if len(checkpoints) <= 1:
+    if not checkpoints:
         st.info(
-            f"{'No' if not checkpoints else 'Only one'} checkpoint logged yet — "
-            f"peeking risk can only be assessed once an experiment has been "
-            f"checked more than once. Use the slider above to log checkpoints "
-            f"at a few different sample sizes to build up history."
+            "No checkpoint logged yet. Use the slider above to log checkpoints "
+            "at a few different sample sizes to build up a peeking history."
         )
         return
 
@@ -138,10 +168,17 @@ def render_sequential_panel(
             "threshold says it is not — this result may be a false positive "
             "produced by checking too many times. Consider waiting for more data."
         )
-    else:
+    if sequential_risk is not None and sequential_risk.beyond_plan:
+        st.warning(
+            f"The latest checkpoint (n={sequential_risk.latest_checkpoint_n}) is "
+            f"beyond the planned final sample size — the corrected schedule has "
+            f"already spent all of its alpha, so this look is outside what the "
+            f"correction was designed for."
+        )
+    if sequential_risk is not None and not sequential_risk.disagreement:
         st.success(
             "✅ Naive and corrected conclusions agree — no peeking-related "
             "risk detected at this checkpoint."
         )
 
-    _render_trace_plot(checkpoints)
+    _render_trace_plot(checkpoints, n_checkpoints_planned, checkpoint_n)

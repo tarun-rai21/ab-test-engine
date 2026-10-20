@@ -1,5 +1,5 @@
 """
-app/components/segment_panel.py — segment table + Simpson's-paradox
+app/components/segment_panel.py — segment table + effect-reversal
 banner.
 
 Renders core.segments.SegmentAnalysisResult objects, already computed by
@@ -29,13 +29,14 @@ def render_segment_panel(segments: tuple[SegmentAnalysisResult, ...] | None) -> 
     for analysis in segments:
         st.markdown(f"**By `{analysis.segment_column}`**")
 
-        any_paradox = any(s.simpsons_flag for s in analysis.segments)
-        if any_paradox:
-            flagged_names = [s.segment_value for s in analysis.segments if s.simpsons_flag]
+        any_reversal = any(s.reversal_flag for s in analysis.segments)
+        if any_reversal:
+            flagged_names = [s.segment_value for s in analysis.segments if s.reversal_flag]
             st.error(
-                f"🔀 **Simpson's-paradox warning:** the segment(s) "
-                f"{', '.join(flagged_names)} show an effect in the OPPOSITE "
-                f"direction from the overall pooled result "
+                f"🔀 **Effect reversal:** the segment(s) "
+                f"{', '.join(flagged_names)} show a statistically significant "
+                f"(BH-corrected) effect in the OPPOSITE direction from the "
+                f"overall pooled result "
                 f"({analysis.pooled_point_estimate:+.4f}). The aggregate number "
                 f"alone would hide this — investigate before shipping based on "
                 f"the pooled result."
@@ -49,9 +50,9 @@ def render_segment_panel(segments: tuple[SegmentAnalysisResult, ...] | None) -> 
                 "95% CI": f"[{s.inference.ci_lower:.4f}, {s.inference.ci_upper:.4f}]",
                 "p-value": f"{s.inference.p_value:.4g}",
                 "Significant (BH-corrected)": "✅ Yes" if s.bh_significant else "—",
-                "Disagrees with pooled?": "⚠️ Yes" if s.simpsons_flag else "No",
+                "Significant reversal?": "⚠️ Yes" if s.reversal_flag else "No",
             })
-        st.dataframe(pd.DataFrame(rows), hide_index=True, use_container_width=True)
+        st.dataframe(pd.DataFrame(rows), hide_index=True, width="stretch")
 
         if analysis.excluded_segments:
             st.caption(

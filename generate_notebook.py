@@ -42,7 +42,7 @@ cells = [
         "experiment with a **known, configured ground truth** → check "
         "randomization validity → estimate the effect (raw and CUPED) → "
         "demonstrate the peeking-inflation problem and its correction → "
-        "break the result down by segment and flag Simpson's paradox.",
+        "break the result down by segment and flag effect reversals.",
         "",
         "Every number below is produced by running this project's own code "
         "— nothing here is fabricated or asserted from theory. Run this "
@@ -150,17 +150,18 @@ cells = [
         "If an analyst checks significance at every one of 10 checkpoints "
         "and stops the moment `p < 0.05` appears, the TRUE false-positive "
         "rate is far above the nominal 5% — even when there is truly no "
-        "effect. We measure this directly across 500 independent null-"
-        "effect simulations, then show that a simple alpha-spending "
-        "correction restores the false-positive rate back near nominal.",
+        "effect. We measure this directly across 2000 independent null-"
+        "effect simulations, then show that an O'Brien-Fleming boundary "
+        "(constant calibrated so the overall false-positive rate is exactly "
+        "5%) restores the false-positive rate to nominal.",
     ),
     code(
         "naive = simulate_peeking_fpr(",
-        "    n_simulations=500, n_checkpoints=10, checkpoint_n=200, seed=2024,",
+        "    n_simulations=2000, n_checkpoints=10, checkpoint_n=200, seed=2024,",
         ")",
         "schedule = alpha_spending_schedule(n_checkpoints=10, total_alpha=0.05)",
         "corrected = simulate_peeking_fpr(",
-        "    n_simulations=500, n_checkpoints=10, checkpoint_n=200,",
+        "    n_simulations=2000, n_checkpoints=10, checkpoint_n=200,",
         "    threshold_schedule=schedule, seed=2024,",
         ")",
         "",
@@ -172,7 +173,8 @@ cells = [
     md(
         "Notice where the triggers happen: naive triggers are front-loaded "
         "at early checkpoints (stopping on noise), while corrected triggers "
-        "shift almost entirely to the final checkpoint — direct evidence "
+        "essentially never fire at the first looks and concentrate at the "
+        "later checkpoints — direct evidence "
         "the correction targets *early-look noise* specifically, not just a "
         "uniform threshold reduction.",
     ),
@@ -182,7 +184,7 @@ cells = [
         "We now configure a **deliberately heterogeneous** segment effect: "
         "mobile users respond well, desktop users respond badly — and check "
         "whether the engine correctly recovers both directions and flags "
-        "the disagreement (Simpson's paradox).",
+        "the significant reversal (qualitative effect heterogeneity).",
     ),
     code(
         "config2 = {'simulator': {",
@@ -197,7 +199,7 @@ cells = [
         "print(f'Pooled effect: {report2.raw_effect.point_estimate:+.4f}')",
         "print()",
         "for s in report2.segments[0].segments:",
-        "    flag = ' <-- SIMPSON\\'S PARADOX' if s.simpsons_flag else ''",
+        "    flag = ' <-- EFFECT REVERSAL' if s.reversal_flag else ''",
         "    print(f'{s.segment_value:10s}: {s.inference.point_estimate:+.4f}  '",
         "          f'(p={s.inference.p_value:.4g}, BH-significant={s.bh_significant}){flag}')",
     ),
@@ -211,12 +213,14 @@ cells = [
         "2. **CUPED** measurably reduces variance versus the raw estimate "
         "when a correlated pre-experiment covariate exists.",
         "3. **Naive repeated peeking genuinely inflates the false-positive "
-        "rate** well above 5%, and a simple alpha-spending correction "
-        "restores it — with the trigger-position shift proving the "
+        "rate** to roughly 4x the nominal 5%, and a calibrated "
+        "O'Brien-Fleming boundary restores it — with the trigger-position "
+        "shift showing the "
         "correction targets the right mechanism.",
         "4. **Segment analysis correctly recovers a deliberately configured "
         "heterogeneous effect** and flags the segment that disagrees in "
-        "direction with the pooled result — a real Simpson's-paradox catch.",
+        "direction with the pooled result — a sign-reversing heterogeneity "
+        "the pooled number alone would hide.",
         "",
     ),
 ]

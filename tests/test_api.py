@@ -270,3 +270,26 @@ def test_report_matches_analyze_and_does_not_double_persist(client):
 def test_report_nonexistent_experiment_returns_404(client):
     response = client.get("/experiments/exp_does_not_exist/report")
     assert response.status_code == 404
+
+
+@pytest.mark.parametrize("overrides", [
+    {"covariate_correlation": -0.6},          # infeasible for the simulator's skewed covariate
+    {"corrupted_split": 1.5},                 # outside (0, 1)
+    {"segment_heterogeneity": {"device_type": {"mobile": 0.1}, "region": {"US": 0.1}}},
+])
+def test_assign_invalid_simulator_input_returns_422_not_500(client, overrides):
+    """Review issue L1: these all used to surface as 500 Internal Server Error."""
+    experiment_id = _create_experiment(client)
+    response = _assign(client, experiment_id, **overrides)
+    assert response.status_code == 422
+
+
+def test_create_experiment_duplicate_variant_names_returns_422(client):
+    response = client.post("/experiments", json={
+        "name": "dup",
+        "variants": [
+            {"name": "control", "split_pct": 0.5},
+            {"name": "control", "split_pct": 0.5},
+        ],
+    })
+    assert response.status_code == 422

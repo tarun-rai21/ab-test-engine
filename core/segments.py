@@ -1,13 +1,13 @@
 """
 core/segments.py — Phase 6: per-segment effect estimation, Benjamini-
-Hochberg multiple-testing correction, and Simpson's-paradox sign-flip
-detection.
+Hochberg multiple-testing correction, and detection of segments whose
+effect significantly reverses the pooled direction.
 
 ARCHITECTURE: this module reuses core.inference.raw_ttest_ci() directly,
 called once per segment slice of the data — the SAME already-validated
 statistical primitive used for the pooled effect estimate, not a new
 statistical method. The two genuinely new pieces here are
-benjamini_hochberg() and simpsons_paradox_flag(), both pure, closed-form,
+benjamini_hochberg() and effect_reversal_flag(), both pure, closed-form,
 and independently testable with hand-verifiable inputs.
 
 This module takes a DataFrame directly (shaped like
@@ -76,27 +76,40 @@ def benjamini_hochberg(p_values: list[float], fdr: float = DEFAULT_FDR) -> list[
     return significant
 
 
-def simpsons_paradox_flag(pooled_estimate: float, segment_estimate: float) -> bool:
+def effect_reversal_flag(
+    pooled_estimate: float, segment_estimate: float, segment_significant: bool
+) -> bool:
     """
-    Flags whether a segment's point estimate has the OPPOSITE sign from the
-    pooled estimate — the hallmark of Simpson's paradox: an aggregate
-    effect that masks a genuinely different (or reversed) effect within a
-    subgroup.
+    Flags a segment whose effect is SIGNIFICANTLY in the opposite direction
+    from the pooled estimate — a qualitative (sign-reversing) treatment-
+    effect heterogeneity: shipping on the pooled result would actively
+    harm this segment.
 
-    CONVENTION: if either value is exactly 0.0, this returns False (no
-    flag). A sign comparison against a true zero is not a meaningful
-    paradox signal — treating 0.0 as arbitrarily "positive" or "negative"
-    would produce a worse default than simply declining to flag a
-    genuinely null comparison.
+    WHY NOT CALL THIS SIMPSON'S PARADOX (review issue D1): Simpson's
+    paradox is an aggregate that reverses the direction of ALL subgroups,
+    which requires subgroup membership to be confounded with treatment
+    assignment. Under randomization, segment mix is balanced across arms,
+    so the pooled effect is approximately a weighted average of segment
+    effects and cannot have the opposite sign to every segment. What a
+    randomized experiment CAN show is one segment moving against the
+    pooled direction — that is what this flags.
 
-    Explicitly cast to a native Python bool before returning: if either
-    input arrives as a numpy scalar (e.g. from a pandas .mean()), the
-    (a > b) != (c > d) comparison naturally produces numpy.bool_, not
-    Python's bool. numpy.bool_(True) is NOT the same object as Python's
-    True, so an `is True` check downstream would silently fail — the same
-    type-purity issue already documented and cast around in this project's
-    core/persistence.py (int(trusted)) and db/seed.py (coerce_for_sqlite).
+    REQUIRES SIGNIFICANCE: segment_significant should be the segment's
+    Benjamini-Hochberg decision. A pure point-estimate sign comparison
+    (the previous behaviour) fires on any noisy segment whose CI straddles
+    zero, which is a false alarm, not evidence of reversal.
+
+    CONVENTION: if either estimate is exactly 0.0, this returns False — a
+    sign comparison against a true zero is not meaningful.
+
+    Explicitly cast to a native Python bool: numpy scalar inputs (e.g. from
+    a pandas .mean()) would otherwise produce numpy.bool_, which fails an
+    `is True` identity check downstream — the same type-purity issue cast
+    around in core/persistence.py (int(trusted)) and db/seed.py
+    (coerce_for_sqlite).
     """
+    if not segment_significant:
+        return False
     if pooled_estimate == 0.0 or segment_estimate == 0.0:
         return False
     return bool((pooled_estimate > 0) != (segment_estimate > 0))
@@ -107,7 +120,7 @@ class SegmentResult:
     segment_value: str
     inference: InferenceResult
     bh_significant: bool
-    simpsons_flag: bool
+    reversal_flag: bool  # significant effect opposite in sign to the pooled effect
 
 
 @dataclass(frozen=True)
@@ -127,8 +140,8 @@ def segment_breakdown(
     """
     Computes a per-segment effect estimate for every distinct value of
     segment_column, applies Benjamini-Hochberg across all segment-level
-    p-values tested, and flags any segment whose sign disagrees with the
-    pooled estimate.
+    p-values tested, and flags any BH-significant segment whose sign
+    disagrees with the pooled estimate (see effect_reversal_flag).
 
     df must be shaped like core.data_access.get_inference_data()'s output —
     at minimum 'variant_id', 'converted', and segment_column present.
@@ -195,7 +208,9 @@ def segment_breakdown(
             segment_value=value,
             inference=inference,
             bh_significant=bh_flags[i],
-            simpsons_flag=simpsons_paradox_flag(pooled_point_estimate, inference.point_estimate),
+            reversal_flag=effect_reversal_flag(
+                pooled_point_estimate, inference.point_estimate, bh_flags[i]
+            ),
         )
         for i, (value, inference) in enumerate(per_segment)
     )

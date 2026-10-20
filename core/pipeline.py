@@ -38,14 +38,17 @@ DESIGN DECISIONS, made explicit here rather than left implicit in code:
 4. Sequential-peeking check is genuinely optional. The schema has no column
    anywhere that stores an experiment's PLANNED checkpoint schedule
    (n_checkpoints_planned, checkpoint_n) — so these are accepted as
-   optional caller-supplied parameters. If omitted, or if fewer than 2
-   checkpoint rows exist yet, sequential_risk is simply None in the report.
+   optional caller-supplied parameters. If omitted, or if no checkpoint
+   rows exist yet, sequential_risk is simply None in the report. A single
+   checkpoint IS evaluated: the first look is the most noise-prone one, so
+   skipping it would hide exactly the risk this check exists for.
+   checkpoint_n and the stored cumulative_n are TOTAL users across arms.
    This is a real, honest schema gap surfaced here, not papered over.
 
 5. Segment analysis (Phase 6) is optional, driven by an explicit
    segment_columns parameter — one SegmentAnalysisResult per requested
    column, or None if no columns were requested. Uses the RAW (not CUPED)
-   pooled point estimate as the Simpson's-paradox reference — matches the
+   pooled point estimate as the effect-reversal reference — matches the
    spec exactly (core/segments.py's segment_breakdown() reuses
    raw_ttest_ci() per segment, mirroring the pooled raw effect, not the
    CUPED-adjusted one). Each segment's persisted row uses
@@ -74,7 +77,7 @@ from core.data_access import (
     split_by_variant,
 )
 from core.inference import InferenceResult, cuped_adjust, raw_ttest_ci, variance_reduction_pct
-from core.persistence import persist_inference_result
+from core.persistence import persist_inference_result, persist_srm_result
 from core.segments import SegmentAnalysisResult, segment_breakdown
 from core.sequential import SequentialCheckResult, sequential_check
 from core.validity import SRMResult, mde_curve, srm_check
@@ -118,7 +121,7 @@ def analyze_experiment(
 
     segment_columns: pass a list of column names from
     core.data_access.ALLOWED_SEGMENT_COLUMNS (e.g. ["device_type",
-    "region"]) to run Benjamini-Hochberg-corrected, Simpson's-paradox-
+    "region"]) to run Benjamini-Hochberg-corrected, effect-reversal-
     flagged segment analysis for each. Omit (None) to skip entirely
     (segments=None in the report, and no segment columns are even fetched
     from the database). A failure analyzing one requested column (e.g.
@@ -148,6 +151,7 @@ def analyze_experiment(
     raw_effect = raw_ttest_ci(raw_control, raw_treatment)
 
     if persist:
+        persist_srm_result(engine, experiment_id, srm_result)
         persist_inference_result(engine, experiment_id, metric_name, raw_effect, srm_result)
 
     # --- Achievable MDE: context, not a gate. A failure here (e.g. observed
@@ -192,7 +196,7 @@ def analyze_experiment(
     sequential_risk: SequentialCheckResult | None = None
     if n_checkpoints_planned is not None and checkpoint_n is not None:
         checkpoints = get_sequential_checkpoints(engine, experiment_id)
-        if len(checkpoints) > 1:
+        if checkpoints:
             sequential_risk = sequential_check(
                 checkpoints, n_checkpoints_planned, checkpoint_n
             )
