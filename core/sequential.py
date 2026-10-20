@@ -1,19 +1,28 @@
 """
 core/sequential.py — empirical false-positive-rate simulation under naive
-repeated significance testing ("peeking"), an O'Brien-Fleming-style
-alpha-spending correction (verified empirically against the same simulation,
-not trusted from the closed-form formula alone), and a live-experiment check
-that applies the correction to a real, in-progress experiment's stored
-checkpoint history.
+repeated significance testing ("peeking"), two group-sequential corrections
+(verified empirically against the same simulation, not trusted from the
+formulas alone), and a live-experiment check that applies a correction to a
+real, in-progress experiment's stored checkpoint history.
+
+The two corrections:
+  - alpha_spending_schedule(): classical O'Brien-Fleming for K EQUALLY
+    spaced looks (index-based, calibrated constant).
+  - lan_demets_boundary(): Lan-DeMets alpha spending with an
+    O'Brien-Fleming-type spending function, driven by each look's actual
+    INFORMATION FRACTION (cumulative_n / planned total). Valid for
+    irregular, unplanned look times — the default for live checks.
 """
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 from functools import lru_cache
 
 import numpy as np
 from scipy.optimize import brentq
+from scipy.signal import fftconvolve
 from scipy.stats import norm
 
 from core.inference import raw_ttest_ci
@@ -38,6 +47,8 @@ class SequentialCheckResult:
     corrected_significant: bool
     disagreement: bool             # True = naive says yes, corrected says no (the dangerous case)
     beyond_plan: bool = False      # True = latest look is past the planned final sample size
+    spending: str = "lan_demets"   # "lan_demets" (information-based) | "obrien_fleming" (index)
+    information_fraction: float | None = None  # latest cumulative_n / planned total
 
 
 def _obf_crossing_probability(c: float, n_checkpoints: int, grid_step: float = 0.005) -> float:
@@ -106,6 +117,120 @@ def alpha_spending_schedule(n_checkpoints: int, total_alpha: float = 0.05) -> tu
         )
 
     return tuple(float(2 * (1 - norm.cdf(c * np.sqrt(K / k)))) for k in range(1, K + 1))
+
+
+def lan_demets_obf_spending(information_fraction: float, total_alpha: float = 0.05) -> float:
+    """
+    Cumulative two-sided alpha spent by information fraction t, using the
+    Lan-DeMets O'Brien-Fleming-type spending function applied symmetrically
+    (alpha/2 per side, the convention of R's ldbounds/gsDesign):
+
+        alpha(t) = 4 * (1 - Phi(z_(alpha/4) / sqrt(t))),   0 < t <= 1
+
+    alpha(1) = total_alpha exactly; alpha(t) is vanishingly small early,
+    so — like O'Brien-Fleming — almost nothing is spent on early looks.
+    t > 1 (looking past the planned sample size) is capped at 1: the
+    budget is fully spent by then. Uses norm.sf, not 1 - cdf, so tiny
+    early values don't underflow to exactly zero.
+    """
+    if information_fraction <= 0:
+        raise ValueError(f"information_fraction must be > 0, got {information_fraction}")
+    t = min(information_fraction, 1.0)
+    return float(4.0 * norm.sf(norm.isf(total_alpha / 4) / np.sqrt(t)))
+
+
+def lan_demets_boundary(
+    information_fractions: Sequence[float],
+    total_alpha: float = 0.05,
+    grid_step: float = 0.001,
+) -> tuple[float, ...]:
+    """
+    Nominal two-sided p-value thresholds for looks taken at the given
+    information fractions t_1 < t_2 < ... (t_k = cumulative_n_k / planned
+    total n), such that the null probability of crossing at look k for the
+    FIRST time equals alpha(t_k) - alpha(t_{k-1}) (lan_demets_obf_spending).
+    The overall type-I error is therefore total_alpha whenever the final
+    look reaches t >= 1, for ANY spacing of looks — unlike
+    alpha_spending_schedule(), whose calibration assumes equal spacing.
+
+    Each look's threshold depends only on the looks up to and including it,
+    so thresholds for past looks never change when new looks are added.
+
+    METHOD (Armitage-McPherson-Rowe recursion on the Brownian scale): under
+    the null, W(t) = Z(t) * sqrt(t) has independent N(0, t_k - t_{k-1})
+    increments. Starting from W(t_1) ~ N(0, t_1), repeatedly convolve the
+    sub-density of paths that have NOT yet crossed with the next increment's
+    normal density, then choose the boundary c_k so the mass beyond +/-c_k
+    equals this look's alpha increment. z_k = c_k / sqrt(t_k).
+
+    Verified against published ldbounds values for 5 equally spaced looks
+    (z = 4.877, 3.357, 2.680, 2.290, 2.031) in tests/test_sequential.py.
+    Looks past t = 1 have nothing left to spend and get threshold 0.0
+    (they can never reject).
+    """
+    fractions = [float(t) for t in information_fractions]
+    if not fractions:
+        raise ValueError("information_fractions must be non-empty")
+    if fractions[0] <= 0 or any(b <= a for a, b in zip(fractions, fractions[1:])):
+        raise ValueError(
+            f"information_fractions must be positive and strictly increasing, got {fractions}"
+        )
+    if not (0.0 < total_alpha < 1.0):
+        raise ValueError(f"total_alpha must be in (0,1), got {total_alpha}")
+
+    spent = [lan_demets_obf_spending(t, total_alpha) for t in fractions]
+    increments = np.diff([0.0] + spent)
+
+    thresholds: list[float] = []
+    # Grid on the W scale, symmetric about 0: x = h * (-n..n).
+    h = grid_step
+    n = int(np.ceil(8 * np.sqrt(fractions[0]) / h))
+    x = h * np.arange(-n, n + 1)
+    density = norm.pdf(x, scale=np.sqrt(fractions[0]))
+    previous_t = fractions[0]
+
+    for k, t in enumerate(fractions):
+        if k > 0:
+            sd = np.sqrt(t - previous_t)
+            half = int(np.ceil(8 * sd / h))
+            kernel = norm.pdf(h * np.arange(-half, half + 1), scale=sd) * h
+            density = np.clip(fftconvolve(density, kernel, mode="full"), 0.0, None)
+            n += half
+            x = h * np.arange(-n, n + 1)
+            previous_t = t
+
+        increment = increments[k]
+        if increment <= 0.0:
+            thresholds.append(0.0)  # nothing left to spend: this look cannot reject
+            continue
+
+        if k == 0:
+            # First look: W(t_1) ~ N(0, t_1), so the boundary is closed-form.
+            z_1 = norm.isf(increment / 2)
+            thresholds.append(float(increment))
+            density[np.abs(x) >= z_1 * np.sqrt(t)] = 0.0
+            continue
+
+        # Mass strictly inside |W| < x_j, accumulated outward from the centre.
+        centre = n
+        pair_mass = density[centre + 1:] + density[centre - 1::-1]
+        inside = (density[centre] + np.concatenate([[0.0], np.cumsum(pair_mass)])) * h
+        target_inside = inside[-1] - increment
+        j = int(np.searchsorted(inside, target_inside))
+        if j >= len(inside):
+            c = x[-1]
+        elif j == 0:
+            c = 0.0
+        else:
+            # Linear interpolation between grid radii (j-1)*h and j*h.
+            frac = (target_inside - inside[j - 1]) / (inside[j] - inside[j - 1])
+            c = (j - 1 + frac) * h
+
+        z_k = c / np.sqrt(t)
+        thresholds.append(float(2 * norm.sf(z_k)))
+        density[np.abs(x) >= c] = 0.0
+
+    return tuple(thresholds)
 
 
 def simulate_peeking_fpr(
@@ -237,13 +362,24 @@ def sequential_check(
     checkpoint_n: int,
     naive_alpha: float = 0.05,
     total_alpha: float = 0.05,
+    spending: str = "lan_demets",
 ) -> SequentialCheckResult:
     """
-    Applies the alpha-spending schedule to a REAL, live experiment's stored
+    Applies an alpha-spending correction to a REAL, live experiment's stored
     checkpoint history, rather than a simulation. Flags disagreement between
-    the naive (flat 5%) rule and the corrected (position-aware) rule at the
-    LATEST checkpoint only — earlier checkpoints are historical record, not
-    the current decision point.
+    the naive (flat 5%) rule and the corrected rule at the LATEST checkpoint
+    only — earlier checkpoints are historical record, not the current
+    decision point.
+
+    spending:
+      - "lan_demets" (default): information-based. Every stored look's
+        information fraction t = cumulative_n / (n_checkpoints_planned *
+        checkpoint_n) feeds lan_demets_boundary(), so irregular or
+        unplanned look times are handled correctly.
+      - "obrien_fleming": the classical index-based schedule from
+        alpha_spending_schedule(), mapping the latest look to its nearest
+        planned position. Exact only when looks follow the planned equal
+        spacing; kept for comparison.
 
     checkpoints: list of dicts, each representing one saved row from the
     sequential_checkpoints table, e.g.
@@ -268,9 +404,22 @@ def sequential_check(
     p_value = latest["p_value_at_check"]
 
     position, beyond_plan = checkpoint_position(latest_n, n_checkpoints_planned, checkpoint_n)
+    planned_total_n = n_checkpoints_planned * checkpoint_n
+    information_fraction = latest_n / planned_total_n
 
-    schedule = alpha_spending_schedule(n_checkpoints_planned, total_alpha)
-    corrected_threshold = schedule[position - 1]
+    if spending == "lan_demets":
+        look_ns = sorted({c["cumulative_n"] for c in checkpoints})
+        thresholds = lan_demets_boundary([n / planned_total_n for n in look_ns], total_alpha)
+        corrected_threshold = thresholds[-1]
+        # Information-based: any look past the planned total is beyond plan.
+        beyond_plan = latest_n > planned_total_n
+    elif spending == "obrien_fleming":
+        schedule = alpha_spending_schedule(n_checkpoints_planned, total_alpha)
+        corrected_threshold = schedule[position - 1]
+    else:
+        raise ValueError(
+            f"spending must be 'lan_demets' or 'obrien_fleming', got {spending!r}"
+        )
 
     naive_significant = bool(p_value < naive_alpha)
     corrected_significant = bool(p_value < corrected_threshold)
@@ -284,6 +433,8 @@ def sequential_check(
         corrected_significant=corrected_significant,
         disagreement=(naive_significant and not corrected_significant),
         beyond_plan=beyond_plan,
+        spending=spending,
+        information_fraction=information_fraction,
     )
 
 

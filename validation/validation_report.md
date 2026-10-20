@@ -49,6 +49,8 @@ runs (common random numbers).
 | O'Brien-Fleming, calibrated c=2.0865 | **5.15%** (103/2000) | 5% (band 3.5%–7%) |
 | Irregular spacing, naive | **20.45%** (409/2000) | — |
 | Irregular spacing, corrected | **4.80%** (96/2000) | must beat naive |
+| Lan-DeMets, equal spacing | **5.25%** (105/2000) | 5% (band 3.5%–7%) |
+| Lan-DeMets, irregular spacing | **5.05%** (101/2000) | 5% (band 3.5%–7%) |
 
 **Trigger positions** (checkpoints 1→10): naive
 `(89, 75, 47, 50, 29, 23, 30, 18, 24, 14)` — front-loaded on early-look
@@ -72,10 +74,10 @@ mobile.
 
 ## 5. Known Limitations
 
-- The O'Brien-Fleming boundary is calibrated exactly for **equally spaced**
-  looks. It is index-based, not information-based; irregular spacing was
-  validated empirically (4.80%) for one schedule but is not guaranteed in
-  general. A Lan-DeMets spending function would remove this assumption.
+- The index-based O'Brien-Fleming schedule is exact only for **equally
+  spaced** looks. The Lan-DeMets boundary (the default for live checks)
+  removes that assumption — 5.05% under irregular spacing — but still
+  assumes a fixed planned total sample size.
 - Validation covers a binary conversion metric (plus one continuous CUPED
   case); heavy-tailed revenue metrics are not validated.
 - Segment recovery is a single large-n check, not a repeated-simulation

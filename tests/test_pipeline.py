@@ -558,3 +558,29 @@ def test_analyze_experiment_persists_srm_check(isolated_db):
     assert len(rows) == 1
     assert rows[0].flagged == 1 and report.srm.flagged is True
     assert rows[0].p_value == pytest.approx(report.srm.p_value)
+
+
+def test_sequential_check_spending_option_flows_through_pipeline(isolated_db):
+    """
+    Looks at n=1000 and n=2000 of a planned 10 x 200: Lan-DeMets (default)
+    knows only one earlier look happened; the index-based schedule treats
+    n=2000 as look 10 of 10. p=0.045 is significant only under Lan-DeMets.
+    """
+    engine = isolated_db
+    seed_database({"simulator": {
+        "n_users": 2000, "baseline_rate": 0.10, "true_effect": 0.0,
+        "covariate_correlation": 0.0, "seed": 141, "corrupted_split": None,
+    }}, database_url="sqlite:///:memory:")
+    _insert_checkpoint(engine, "exp_seed141", "cp1", 1000, 0.20)
+    _insert_checkpoint(engine, "exp_seed141", "cp2", 2000, 0.045)
+
+    ld = analyze_experiment(
+        engine, "exp_seed141", n_checkpoints_planned=10, checkpoint_n=200, persist=False
+    ).sequential_risk
+    obf = analyze_experiment(
+        engine, "exp_seed141", n_checkpoints_planned=10, checkpoint_n=200,
+        persist=False, spending="obrien_fleming",
+    ).sequential_risk
+
+    assert ld.spending == "lan_demets" and ld.corrected_significant is True
+    assert obf.spending == "obrien_fleming" and obf.corrected_significant is False

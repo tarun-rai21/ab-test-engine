@@ -75,7 +75,12 @@ with col2:
 with col3:
     enable_sequential = st.checkbox("Enable peeking-risk check", value=False)
     n_checkpoints_planned = st.number_input(
-        "Planned checkpoints", min_value=1, value=10, disabled=not enable_sequential
+        "Planned checkpoints", min_value=1, value=10, disabled=not enable_sequential,
+        help=(
+            "Together with the users per checkpoint, this sets the PLANNED total "
+            "sample size. The Lan-DeMets correction uses each look's share of "
+            "that total, so actual looks don't need to follow the plan."
+        ),
     )
     checkpoint_n = st.number_input(
         "Total users (both arms) per planned checkpoint",

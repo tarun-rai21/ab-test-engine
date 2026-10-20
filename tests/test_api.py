@@ -293,3 +293,12 @@ def test_create_experiment_duplicate_variant_names_returns_422(client):
         ],
     })
     assert response.status_code == 422
+
+
+def test_analyze_rejects_unknown_spending_method(client):
+    experiment_id = _create_experiment(client)
+    _assign(client, experiment_id)
+    response = client.post(
+        f"/experiments/{experiment_id}/analyze", json={"spending": "pocock"}
+    )
+    assert response.status_code == 422

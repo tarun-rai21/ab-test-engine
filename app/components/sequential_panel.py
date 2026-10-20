@@ -25,7 +25,7 @@ from sqlalchemy import text
 
 from core.data_access import get_sequential_checkpoints
 from core.inference import raw_ttest_ci
-from core.sequential import SequentialCheckResult, alpha_spending_schedule, checkpoint_position
+from core.sequential import SequentialCheckResult, lan_demets_boundary
 
 
 def _insert_checkpoint(
@@ -59,12 +59,11 @@ def _render_trace_plot(
     checkpoint_n: int | None,
 ) -> None:
     """
-    The corrected threshold at each logged checkpoint comes from the
-    PLANNED schedule at that checkpoint's position — the same mapping
-    sequential_check() uses for the verdict (review issue M2: this used to
-    build a schedule from the number of checkpoints logged so far, so the
-    plotted line could contradict the verdict above it). Without a planned
-    schedule, only the naive threshold is drawn.
+    The corrected threshold at each logged checkpoint is the Lan-DeMets
+    boundary for the looks actually taken, at their information fractions
+    (cumulative_n / planned total) — the same computation sequential_check()
+    uses for the verdict, so the plotted line and the verdict always agree.
+    Without a planned total, only the naive threshold is drawn.
     """
     checkpoints_sorted = sorted(checkpoints, key=lambda c: c["cumulative_n"])
 
@@ -75,12 +74,15 @@ def _render_trace_plot(
     ax.plot(xs, ps, "o-", color="steelblue", label="Observed p-value")
     ax.axhline(0.05, color="firebrick", linestyle="--", label="Naive threshold (0.05)")
     if n_checkpoints_planned is not None and checkpoint_n is not None:
-        schedule = alpha_spending_schedule(n_checkpoints=n_checkpoints_planned, total_alpha=0.05)
-        thresholds = [
-            schedule[checkpoint_position(n, n_checkpoints_planned, checkpoint_n)[0] - 1]
-            for n in xs
-        ]
-        ax.plot(xs, thresholds, "x--", color="darkorange", label="Corrected threshold")
+        planned_total = n_checkpoints_planned * checkpoint_n
+        look_ns = sorted(set(xs))
+        by_n = dict(zip(look_ns, lan_demets_boundary([n / planned_total for n in look_ns])))
+        # Looks past the planned total can never reject (threshold 0), which
+        # a log axis cannot draw — they are left off the threshold line.
+        drawn = [(n, by_n[n]) for n in look_ns if by_n[n] > 0]
+        if drawn:
+            ax.plot(*zip(*drawn), "x--", color="darkorange",
+                    label="Corrected threshold (Lan-DeMets)")
         ax.set_yscale("log")
     ax.set_xlabel("Cumulative sample size")
     ax.set_ylabel("p-value")
@@ -131,12 +133,17 @@ def render_sequential_panel(
         )
         cumulative_n = checkpoint_n_per_arm * 2
         # Record the threshold that actually applied at this look: the
-        # planned schedule's value at this position if a plan is set,
-        # otherwise the naive 0.05 (this used to always store 0.05).
+        # Lan-DeMets boundary given every look up to and including this one
+        # if a plan is set, otherwise the naive 0.05.
         alpha_threshold = 0.05
         if n_checkpoints_planned is not None and checkpoint_n is not None:
-            position, _ = checkpoint_position(cumulative_n, n_checkpoints_planned, checkpoint_n)
-            alpha_threshold = alpha_spending_schedule(n_checkpoints_planned)[position - 1]
+            planned_total = n_checkpoints_planned * checkpoint_n
+            prior_ns = {
+                c["cumulative_n"] for c in get_sequential_checkpoints(engine, experiment_id)
+                if c["cumulative_n"] < cumulative_n
+            }
+            look_ns = sorted(prior_ns | {cumulative_n})
+            alpha_threshold = lan_demets_boundary([n / planned_total for n in look_ns])[-1]
         _insert_checkpoint(
             engine, experiment_id, cumulative_n, prefix_result.p_value, alpha_threshold
         )
@@ -171,9 +178,9 @@ def render_sequential_panel(
     if sequential_risk is not None and sequential_risk.beyond_plan:
         st.warning(
             f"The latest checkpoint (n={sequential_risk.latest_checkpoint_n}) is "
-            f"beyond the planned final sample size — the corrected schedule has "
-            f"already spent all of its alpha, so this look is outside what the "
-            f"correction was designed for."
+            f"beyond the planned final sample size — the Lan-DeMets budget is "
+            f"fully spent at the planned total, so this look cannot produce a "
+            f"significant result. Extending past the plan needs a new design."
         )
     if sequential_risk is not None and not sequential_risk.disagreement:
         st.success(

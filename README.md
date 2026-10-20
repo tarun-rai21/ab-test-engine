@@ -124,7 +124,7 @@ ab-test-engine/
 ├── core/
 │   ├── validity.py       # SRM chi-square check, power/MDE calculator
 │   ├── inference.py      # Welch's t-test, CUPED adjustment, variance reduction
-│   ├── sequential.py     # peeking-FPR simulation, calibrated O'Brien-Fleming boundary
+│   ├── sequential.py     # peeking-FPR simulation, O'Brien-Fleming + Lan-DeMets boundaries
 │   ├── segments.py       # per-segment effects, BH correction, effect-reversal flag
 │   ├── persistence.py    # the only writer of experiment_results.trusted
 │   ├── data_access.py    # the only file with raw SQL
@@ -170,6 +170,8 @@ Measured by actually running `validation/*.py`, not asserted — see
 | Naive peeking empirical FPR | ~19.3% (theory) | **19.95%** (399/2000) | 10 checkpoints × 200/arm, flat α=0.05. |
 | O'Brien-Fleming corrected FPR | 5% (band 3.5%–7%) | **5.15%** (103/2000) | Calibrated constant c=2.0865; identical data (common random numbers). |
 | Corrected FPR under irregular checkpoint spacing | Must beat naive | **4.80%** vs naive **20.45%** | Uneven daily-style spacing; no meaningful degradation vs. even spacing. |
+| Lan-DeMets FPR, equal spacing | 5% (band 3.5%–7%) | **5.25%** (105/2000) | Information-based boundary — the default for live experiments. |
+| Lan-DeMets FPR, irregular spacing | 5% (band 3.5%–7%) | **5.05%** (101/2000) | Calibrated to each look's actual information fraction, not assumed to be equal. |
 | Segment recovery (deliberately heterogeneous) | Correct sign, magnitude within noise | **Mobile: +0.147** (configured +0.15); **Desktop: -0.070** (configured -0.08) | Effect-reversal flag correctly fired on the significantly opposite segment. |
 
 The naive→corrected trigger-position shift (naive triggers front-loaded at
@@ -185,11 +187,14 @@ and fixed.
 
 ## Known limitations (stated directly, not discovered later)
 
-- The O'Brien-Fleming boundary's constant is calibrated exactly (recursive
-  numerical integration) for **equally spaced** looks. It remains
-  **index-based** (checkpoint count) rather than information-based (actual
-  sample-size ratio) — validated empirically under one irregular schedule
-  (4.80%), but a Lan–DeMets spending function would remove the assumption.
+- Live peeking checks use a **Lan-DeMets** boundary (O'Brien-Fleming-type
+  spending, α(t) = 4 − 4Φ(z_{α/4}/√t)) driven by each look's information
+  fraction, so irregular look times are handled exactly. It matches
+  published `ldbounds` values to ~0.001 in z. It still assumes the
+  **planned total sample size** is fixed up front: looking past it spends
+  nothing (those looks cannot reject), and changing the plan mid-test
+  is not supported. The index-based O'Brien-Fleming schedule remains
+  available (`spending="obrien_fleming"`) for planned equal spacing.
 - Segment analysis tests each segment's effect against zero (BH-corrected
   within each segment column); it has no formal interaction test for
   whether segment effects differ from each other.

@@ -20,7 +20,7 @@ real wall-clock cost, not appropriate for routine CI).
 
 import pytest
 
-from core.sequential import alpha_spending_schedule, simulate_peeking_fpr
+from core.sequential import alpha_spending_schedule, lan_demets_boundary, simulate_peeking_fpr
 
 # Naive band: the exact null crossing probability of a flat |z| >= 1.96 at
 # 10 equally spaced looks is ~19.3% (Armitage-McPherson-Rowe), so the
@@ -200,3 +200,36 @@ def test_correction_still_reduces_fpr_under_irregular_spacing():
         f"checkpoint timing, worth flagging even though it is directionally "
         f"still better than naive."
     )
+
+
+# --------------------------------------------------------------------- #
+# Lan-DeMets (information-based) boundary — the correction used by default
+# for live experiments, where look times are rarely the planned ones.
+# --------------------------------------------------------------------- #
+
+@pytest.mark.slow
+@pytest.mark.parametrize("checkpoint_ns", [
+    pytest.param([200 * (k + 1) for k in range(10)], id="equal_spacing"),
+    pytest.param(IRREGULAR_CHECKPOINT_NS, id="irregular_spacing"),
+])
+def test_lan_demets_restores_nominal_fpr(checkpoint_ns):
+    """
+    Thresholds come from each look's information fraction
+    (cumulative_n / final n), so the boundary is valid for ANY spacing —
+    unlike alpha_spending_schedule(), which is calibrated for equal
+    spacing only. Held to the same tight [3.5%, 7%] band as the
+    equal-spacing O'Brien-Fleming test above, under BOTH spacings.
+    """
+    fractions = [n / checkpoint_ns[-1] for n in checkpoint_ns]
+    schedule = lan_demets_boundary(fractions, total_alpha=0.05)
+
+    result = simulate_peeking_fpr(
+        n_simulations=N_SIMULATIONS, n_checkpoints=len(checkpoint_ns),
+        checkpoint_ns=checkpoint_ns, threshold_schedule=schedule, seed=SEED,
+    )
+    print(
+        f"\n[lan-demets] fpr={result.empirical_fpr:.4f} "
+        f"({int(round(result.empirical_fpr * N_SIMULATIONS))}/{N_SIMULATIONS}), "
+        f"trigger_counts={result.checkpoint_trigger_counts}"
+    )
+    assert CORRECTED_FPR_LOWER_BOUND <= result.empirical_fpr <= CORRECTED_FPR_UPPER_BOUND
