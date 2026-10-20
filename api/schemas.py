@@ -130,7 +130,7 @@ class SegmentResultSchema(BaseModel):
     segment_value: str
     inference: InferenceResultSchema
     bh_significant: bool
-    simpsons_flag: bool
+    reversal_flag: bool
 
 
 class SegmentAnalysisResultSchema(BaseModel):

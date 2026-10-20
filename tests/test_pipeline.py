@@ -381,7 +381,7 @@ def test_segments_field_is_none_when_no_segment_columns_requested(isolated_db):
     assert report.segments is None
 
 
-def test_segment_analysis_recovers_heterogeneous_effect_and_flags_simpsons(
+def test_segment_analysis_recovers_heterogeneous_effect_and_flags_reversal(
     isolated_db,
 ):
     """
@@ -417,11 +417,11 @@ def test_segment_analysis_recovers_heterogeneous_effect_and_flags_simpsons(
 
     assert by_value["mobile"].inference.point_estimate > 0.05
     assert by_value["mobile"].bh_significant is True
-    assert by_value["mobile"].simpsons_flag is False
+    assert by_value["mobile"].reversal_flag is False
 
     assert by_value["desktop"].inference.point_estimate < 0
     assert by_value["desktop"].bh_significant is True
-    assert by_value["desktop"].simpsons_flag is True
+    assert by_value["desktop"].reversal_flag is True
 
     # 4 persisted rows: pooled raw, pooled cuped, and 2 segment rows —
     # each segment row tagged "device_type:<value>", confirmed by direct

@@ -38,7 +38,7 @@ st.title("A/B Test Analysis Engine")
 st.caption(
     "Structural enforcement of correct experimentation methodology — "
     "SRM detection, CUPED variance reduction, peeking correction, and "
-    "Simpson's-paradox-aware segment analysis."
+    "effect-reversal-aware segment analysis."
 )
 
 # --------------------------------------------------------------------- #

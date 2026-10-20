@@ -42,7 +42,7 @@ cells = [
         "experiment with a **known, configured ground truth** → check "
         "randomization validity → estimate the effect (raw and CUPED) → "
         "demonstrate the peeking-inflation problem and its correction → "
-        "break the result down by segment and flag Simpson's paradox.",
+        "break the result down by segment and flag effect reversals.",
         "",
         "Every number below is produced by running this project's own code "
         "— nothing here is fabricated or asserted from theory. Run this "
@@ -182,7 +182,7 @@ cells = [
         "We now configure a **deliberately heterogeneous** segment effect: "
         "mobile users respond well, desktop users respond badly — and check "
         "whether the engine correctly recovers both directions and flags "
-        "the disagreement (Simpson's paradox).",
+        "the significant reversal (qualitative effect heterogeneity).",
     ),
     code(
         "config2 = {'simulator': {",
@@ -197,7 +197,7 @@ cells = [
         "print(f'Pooled effect: {report2.raw_effect.point_estimate:+.4f}')",
         "print()",
         "for s in report2.segments[0].segments:",
-        "    flag = ' <-- SIMPSON\\'S PARADOX' if s.simpsons_flag else ''",
+        "    flag = ' <-- EFFECT REVERSAL' if s.reversal_flag else ''",
         "    print(f'{s.segment_value:10s}: {s.inference.point_estimate:+.4f}  '",
         "          f'(p={s.inference.p_value:.4g}, BH-significant={s.bh_significant}){flag}')",
     ),
@@ -216,7 +216,8 @@ cells = [
         "correction targets the right mechanism.",
         "4. **Segment analysis correctly recovers a deliberately configured "
         "heterogeneous effect** and flags the segment that disagrees in "
-        "direction with the pooled result — a real Simpson's-paradox catch.",
+        "direction with the pooled result — a sign-reversing heterogeneity "
+        "the pooled number alone would hide.",
         "",
     ),
 ]

@@ -9,7 +9,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from core.segments import benjamini_hochberg, segment_breakdown, simpsons_paradox_flag
+from core.segments import benjamini_hochberg, effect_reversal_flag, segment_breakdown
 
 # --------------------------------------------------------------------- #
 # benjamini_hochberg — closed-form checks
@@ -72,30 +72,39 @@ def test_benjamini_hochberg_invalid_inputs_raise():
 
 
 # --------------------------------------------------------------------- #
-# simpsons_paradox_flag — closed-form checks
+# effect_reversal_flag — closed-form checks (review issue D1)
 # --------------------------------------------------------------------- #
 
 
-def test_simpsons_paradox_flag_detects_sign_flip():
-    assert simpsons_paradox_flag(pooled_estimate=0.05, segment_estimate=-0.02) is True
-    assert simpsons_paradox_flag(pooled_estimate=-0.05, segment_estimate=0.02) is True
+def test_effect_reversal_flag_detects_significant_sign_flip():
+    assert effect_reversal_flag(0.05, -0.02, segment_significant=True) is True
+    assert effect_reversal_flag(-0.05, 0.02, segment_significant=True) is True
 
 
-def test_simpsons_paradox_flag_no_flag_when_signs_agree():
-    assert simpsons_paradox_flag(pooled_estimate=0.05, segment_estimate=0.02) is False
-    assert simpsons_paradox_flag(pooled_estimate=-0.05, segment_estimate=-0.02) is False
+def test_effect_reversal_flag_ignores_non_significant_sign_flip():
+    """
+    A segment whose CI straddles zero has an opposite-sign point estimate
+    by chance about half the time; the old sign-only flag raised a
+    "Simpson's paradox" alarm for it. Without BH significance: no flag.
+    """
+    assert effect_reversal_flag(0.05, -0.02, segment_significant=False) is False
 
 
-def test_simpsons_paradox_flag_zero_pooled_or_segment_never_flags():
+def test_effect_reversal_flag_no_flag_when_signs_agree():
+    assert effect_reversal_flag(0.05, 0.02, segment_significant=True) is False
+    assert effect_reversal_flag(-0.05, -0.02, segment_significant=True) is False
+
+
+def test_effect_reversal_flag_zero_pooled_or_segment_never_flags():
     """
     Convention documented in the function itself: a comparison against an
     exact zero is not a meaningful sign-flip signal either direction.
     """
-    assert simpsons_paradox_flag(pooled_estimate=0.0, segment_estimate=-0.02) is False
-    assert simpsons_paradox_flag(pooled_estimate=0.05, segment_estimate=0.0) is False
+    assert effect_reversal_flag(0.0, -0.02, segment_significant=True) is False
+    assert effect_reversal_flag(0.05, 0.0, segment_significant=True) is False
 
 
-def test_simpsons_paradox_flag_returns_native_bool_even_with_numpy_scalar_inputs():
+def test_effect_reversal_flag_returns_native_bool_even_with_numpy_scalar_inputs():
     """
     Real gap this test closes: pandas .mean() returns numpy.float64, not a
     native Python float. (a > b) != (c > d) on numpy scalars produces
@@ -105,7 +114,7 @@ def test_simpsons_paradox_flag_returns_native_bool_even_with_numpy_scalar_inputs
     """
     pooled = np.float64(0.1)
     segment = np.float64(-0.05)
-    result = simpsons_paradox_flag(pooled_estimate=pooled, segment_estimate=segment)
+    result = effect_reversal_flag(pooled, segment, segment_significant=np.bool_(True))
     assert result is True  # identity check — this is the whole point of the test
     assert type(result) is bool  # not numpy.bool_
 
@@ -201,19 +210,17 @@ def test_segment_breakdown_missing_column_raises():
         segment_breakdown(df, "nonexistent_column", pooled_point_estimate=0.0)
 
 
-def test_segment_breakdown_detects_simpsons_paradox():
+def test_segment_breakdown_detects_significant_effect_reversal():
     """
-    Constructs a deliberate Simpson's-paradox scenario: the POOLED estimate
-    is positive, but one segment's effect is clearly, strongly negative.
-    simpsons_flag must be True for that segment, False for the one that
+    Constructs a deliberate reversal scenario: the POOLED estimate is
+    positive, but one segment's effect is clearly, significantly negative.
+    reversal_flag must be True for that segment, False for the one that
     agrees in sign with the pooled estimate.
 
-    Segment SIZES are deliberately UNEQUAL (30 vs 10) — the classic
-    real-world shape of Simpson's paradox, where a confounding variable
-    (segment membership here) correlates with both the group split and the
-    outcome. Equal-sized, exactly-opposite-magnitude segments would cancel
+    Segment SIZES are deliberately UNEQUAL (30 vs 10) so the larger
+    segment dominates the pooled sign. Equal-sized, exactly-opposite-magnitude segments would cancel
     to a pooled estimate of precisely 0.0, which this module deliberately
-    declines to flag either way (see simpsons_paradox_flag's zero-value
+    declines to flag either way (see effect_reversal_flag's zero-value
     convention) — that would test the wrong thing here.
     """
     rows = []
@@ -252,8 +259,34 @@ def test_segment_breakdown_detects_simpsons_paradox():
     # Whichever segment disagrees in sign with the (computed) pooled
     # estimate must be flagged; the one that agrees must not be.
     if pooled_estimate > 0:
-        assert by_value["desktop"].simpsons_flag is True
-        assert by_value["mobile"].simpsons_flag is False
+        assert by_value["desktop"].reversal_flag is True
+        assert by_value["mobile"].reversal_flag is False
     else:
-        assert by_value["mobile"].simpsons_flag is True
-        assert by_value["desktop"].simpsons_flag is False
+        assert by_value["mobile"].reversal_flag is True
+        assert by_value["desktop"].reversal_flag is False
+
+
+def test_segment_breakdown_does_not_flag_noisy_opposite_sign_segment():
+    """
+    A small segment with an opposite-sign but non-significant estimate
+    (1/10 vs 0/10 converts) must not be flagged as a reversal.
+    """
+    rows = []
+    for i in range(200):
+        rows.append({"variant_id": "exp_control", "device_type": "mobile",
+                      "converted": 1 if i < 20 else 0})       # 0.10
+        rows.append({"variant_id": "exp_treatment", "device_type": "mobile",
+                      "converted": 1 if i < 60 else 0})       # 0.30
+    for i in range(10):
+        rows.append({"variant_id": "exp_control", "device_type": "desktop",
+                      "converted": 1 if i < 2 else 0})        # 0.20
+        rows.append({"variant_id": "exp_treatment", "device_type": "desktop",
+                      "converted": 1 if i < 1 else 0})        # 0.10
+    df = _make_df(rows)
+
+    result = segment_breakdown(df, "device_type", pooled_point_estimate=0.18)
+    desktop = {s.segment_value: s for s in result.segments}["desktop"]
+
+    assert desktop.inference.point_estimate < 0
+    assert desktop.bh_significant is False
+    assert desktop.reversal_flag is False

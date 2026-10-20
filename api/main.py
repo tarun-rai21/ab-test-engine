@@ -45,8 +45,8 @@ app = FastAPI(
     description=(
         "Thin HTTP layer over core/pipeline.py's analyze_experiment() — "
         "SRM detection, power/MDE context, raw + CUPED effect estimation, "
-        "sequential-peeking risk, and segment analysis with Simpson's-"
-        "paradox detection, all backed by code independently validated "
+        "sequential-peeking risk, and segment analysis with effect-"
+        "reversal detection, all backed by code independently validated "
         "in Phases 1-6."
     ),
     version="0.1.0",

@@ -48,7 +48,7 @@ DESIGN DECISIONS, made explicit here rather than left implicit in code:
 5. Segment analysis (Phase 6) is optional, driven by an explicit
    segment_columns parameter — one SegmentAnalysisResult per requested
    column, or None if no columns were requested. Uses the RAW (not CUPED)
-   pooled point estimate as the Simpson's-paradox reference — matches the
+   pooled point estimate as the effect-reversal reference — matches the
    spec exactly (core/segments.py's segment_breakdown() reuses
    raw_ttest_ci() per segment, mirroring the pooled raw effect, not the
    CUPED-adjusted one). Each segment's persisted row uses
@@ -121,7 +121,7 @@ def analyze_experiment(
 
     segment_columns: pass a list of column names from
     core.data_access.ALLOWED_SEGMENT_COLUMNS (e.g. ["device_type",
-    "region"]) to run Benjamini-Hochberg-corrected, Simpson's-paradox-
+    "region"]) to run Benjamini-Hochberg-corrected, effect-reversal-
     flagged segment analysis for each. Omit (None) to skip entirely
     (segments=None in the report, and no segment columns are even fetched
     from the database). A failure analyzing one requested column (e.g.
