@@ -181,9 +181,16 @@ def render_upload_form() -> str | None:
         )
         return None
 
+    experiment_id = _generate_experiment_id()
+
+    # Stored user_ids are always prefixed with this upload's experiment_id:
+    # the session DB persists across uploads, so a second upload reusing
+    # the same ids (generated or user-supplied) would otherwise collide on
+    # users.user_id or, worse, join to a previous upload's attributes.
+    df = df.copy()
     if "user_id" not in df.columns:
-        df = df.copy()
-        df["user_id"] = [f"u_{i:07d}" for i in range(len(df))]
+        df["user_id"] = [f"{i:07d}" for i in range(len(df))]
+    df["user_id"] = [f"u_{experiment_id}_{uid}" for uid in df["user_id"]]
 
     if "pre_period_covariate" not in df.columns:
         st.warning(
@@ -197,7 +204,6 @@ def render_upload_form() -> str | None:
             df[col] = None
 
     engine = _fresh_session_engine()
-    experiment_id = _generate_experiment_id()
     # Whatever prefix the uploaded file's variant_id values originally had
     # doesn't need to match our newly-generated experiment_id — every
     # downstream query filters by the assignments table's own

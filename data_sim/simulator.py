@@ -189,7 +189,11 @@ class ExperimentSimulator:
     # ------------------------------------------------------------------ #
 
     def _generate_users(self, rng: np.random.Generator) -> pd.DataFrame:
-        user_ids = [f"u_{i:07d}" for i in range(self.n_users)]
+        # Scoped to experiment_id: each simulated population is independent,
+        # so two experiments seeded into one DB must never share user rows
+        # (a shared "u_0000000" made the second experiment join to the
+        # first experiment's covariates and segments).
+        user_ids = [f"u_{self.experiment_id}_{i:07d}" for i in range(self.n_users)]
         device_type = rng.choice(DEVICE_TYPES, size=self.n_users, p=DEVICE_PROBS)
         region = rng.choice(REGIONS, size=self.n_users, p=REGION_PROBS)
         existing_customer = rng.random(self.n_users) < EXISTING_CUSTOMER_PROB

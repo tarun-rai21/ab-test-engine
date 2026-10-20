@@ -52,14 +52,12 @@ _DELETE_ORDER = [
     "assignments",
     "variants",
     "experiments",
-    # NOTE: users are intentionally NOT deleted here. A user could in principle
-    # be shared across experiments in a real system; scoping deletion to
-    # experiment_id alone can't safely clean users without a users.experiment_id
-    # link, which doesn't exist (users aren't experiment-scoped in this schema).
-    # For this synthetic single-experiment-per-seed-run workflow, stale user
-    # rows from a previous seed are harmless (same user_id values get
-    # reinserted identically since generation is deterministic) but ARE a
-    # known imprecision — flagged rather than silently ignored.
+    # NOTE: users have no experiment_id column, so they are not in this
+    # list — _delete_experiment_users() removes them via the assignments
+    # link first. Stale user rows were NOT harmless: before user_ids were
+    # experiment-scoped, re-seeding with a different seed/n_users kept the
+    # previous run's covariates and segments, silently breaking CUPED and
+    # segment analysis.
 ]
 
 
@@ -82,6 +80,26 @@ def coerce_for_sqlite(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
+def _delete_experiment_users(conn, experiment_id: str) -> None:
+    """
+    Removes the users assigned to experiment_id. Must run BEFORE that
+    experiment's assignments are deleted, since assignments is the only
+    link from an experiment to its users.
+
+    Safe because simulator user_ids are experiment-scoped
+    (u_{experiment_id}_{i}): re-seeding an experiment with a different
+    n_users or seed must regenerate its users, not keep stale attributes
+    from the previous run.
+    """
+    conn.execute(
+        text(
+            "DELETE FROM users WHERE user_id IN "
+            "(SELECT user_id FROM assignments WHERE experiment_id = :eid)"
+        ),
+        {"eid": experiment_id},
+    )
+
+
 def _delete_existing_experiment(engine, experiment_id: str) -> None:
     """
     Removes all rows tied to experiment_id, in child-before-parent order, so a
@@ -90,6 +108,7 @@ def _delete_existing_experiment(engine, experiment_id: str) -> None:
     leave orphaned rows behind from a previous run's differently-sized dataset.
     """
     with engine.begin() as conn:
+        _delete_experiment_users(conn, experiment_id)
         for table in _DELETE_ORDER:
             conn.execute(
                 text(f"DELETE FROM {table} WHERE experiment_id = :eid"),
@@ -222,6 +241,7 @@ def seed_assignments_for_existing_experiment(
     with engine.begin() as conn:
         # Scoped to just this function's own tables — experiments/variants
         # are owned by whichever call created them, not by this function.
+        _delete_experiment_users(conn, experiment_id)
         conn.execute(
             text("DELETE FROM assignments WHERE experiment_id = :eid"),
             {"eid": experiment_id},

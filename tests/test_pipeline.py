@@ -476,3 +476,55 @@ def test_analyze_experiment_persist_false_does_not_write_segment_rows(isolated_d
         text("SELECT COUNT(*) FROM experiment_results WHERE experiment_id = 'exp_seed502'")
     ).fetchone()[0]
     assert count == 0
+
+
+def test_second_experiment_in_shared_db_uses_its_own_users(isolated_db):
+    """
+    Regression test for review issue H1: every test above starts from a
+    fresh single-experiment DB, which hid that simulator user_ids were not
+    experiment-scoped. Seeding a second experiment into the same DB used to
+    skip "already existing" users, so its assignments joined to the FIRST
+    experiment's covariates and segments: CUPED variance reduction fell to
+    ~0% and a configured desktop effect of -0.08 came back positive.
+    """
+    engine = isolated_db
+    first = {"simulator": {
+        "n_users": 10000, "baseline_rate": 0.10, "true_effect": 0.0,
+        "covariate_correlation": 0.5, "seed": 1, "corrupted_split": None,
+    }}
+    second = {"simulator": {
+        "n_users": 10000, "baseline_rate": 0.10, "true_effect": 0.0,
+        "covariate_correlation": 0.5, "seed": 2, "corrupted_split": None,
+        "segment_heterogeneity": {"device_type": {"mobile": 0.15, "desktop": -0.08}},
+    }}
+    seed_database(first, database_url="sqlite:///:memory:")
+    seed_database(second, database_url="sqlite:///:memory:")
+
+    report = analyze_experiment(
+        engine, "exp_seed2", segment_columns=["device_type"], persist=False
+    )
+
+    assert report.cuped_variance_reduction_pct > 10.0
+    by_value = {s.segment_value: s for s in report.segments[0].segments}
+    assert by_value["mobile"].inference.point_estimate > 0.05
+    assert by_value["desktop"].inference.point_estimate < 0
+
+    with engine.connect() as conn:
+        n_users = conn.execute(text("SELECT COUNT(*) FROM users")).scalar()
+    assert n_users == 20000
+
+
+def test_reseeding_an_experiment_replaces_its_users(isolated_db):
+    """
+    Re-seeding the SAME experiment_id with a different n_users must not
+    keep stale user rows from the previous run (review issue H1).
+    """
+    engine = isolated_db
+    for n_users in (5000, 3000):
+        seed_database({"simulator": {
+            "n_users": n_users, "baseline_rate": 0.10, "true_effect": 0.0,
+            "covariate_correlation": 0.0, "seed": 3, "corrupted_split": None,
+        }}, database_url="sqlite:///:memory:")
+
+    with engine.connect() as conn:
+        assert conn.execute(text("SELECT COUNT(*) FROM users")).scalar() == 3000
