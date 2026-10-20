@@ -24,6 +24,8 @@ class GroundTruth:
     baseline_rate_realized: float          # NEW — mean-matching check, catches Jensen's-gap bugs
     covariate_correlation_realized: float
     true_effect_realized: float
+    # Realized TOTAL effect per segment (true_effect + delta, after clipping);
+    # segment_effects_configured holds the configured deltas.
     segment_effects_realized: dict[str, float] | None = None
 
     composition: str = "additive"

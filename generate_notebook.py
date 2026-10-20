@@ -150,17 +150,18 @@ cells = [
         "If an analyst checks significance at every one of 10 checkpoints "
         "and stops the moment `p < 0.05` appears, the TRUE false-positive "
         "rate is far above the nominal 5% — even when there is truly no "
-        "effect. We measure this directly across 500 independent null-"
-        "effect simulations, then show that a simple alpha-spending "
-        "correction restores the false-positive rate back near nominal.",
+        "effect. We measure this directly across 2000 independent null-"
+        "effect simulations, then show that an O'Brien-Fleming boundary "
+        "(constant calibrated so the overall false-positive rate is exactly "
+        "5%) restores the false-positive rate to nominal.",
     ),
     code(
         "naive = simulate_peeking_fpr(",
-        "    n_simulations=500, n_checkpoints=10, checkpoint_n=200, seed=2024,",
+        "    n_simulations=2000, n_checkpoints=10, checkpoint_n=200, seed=2024,",
         ")",
         "schedule = alpha_spending_schedule(n_checkpoints=10, total_alpha=0.05)",
         "corrected = simulate_peeking_fpr(",
-        "    n_simulations=500, n_checkpoints=10, checkpoint_n=200,",
+        "    n_simulations=2000, n_checkpoints=10, checkpoint_n=200,",
         "    threshold_schedule=schedule, seed=2024,",
         ")",
         "",
@@ -172,7 +173,8 @@ cells = [
     md(
         "Notice where the triggers happen: naive triggers are front-loaded "
         "at early checkpoints (stopping on noise), while corrected triggers "
-        "shift almost entirely to the final checkpoint — direct evidence "
+        "essentially never fire at the first looks and concentrate at the "
+        "later checkpoints — direct evidence "
         "the correction targets *early-look noise* specifically, not just a "
         "uniform threshold reduction.",
     ),
@@ -211,8 +213,9 @@ cells = [
         "2. **CUPED** measurably reduces variance versus the raw estimate "
         "when a correlated pre-experiment covariate exists.",
         "3. **Naive repeated peeking genuinely inflates the false-positive "
-        "rate** well above 5%, and a simple alpha-spending correction "
-        "restores it — with the trigger-position shift proving the "
+        "rate** to roughly 4x the nominal 5%, and a calibrated "
+        "O'Brien-Fleming boundary restores it — with the trigger-position "
+        "shift showing the "
         "correction targets the right mechanism.",
         "4. **Segment analysis correctly recovers a deliberately configured "
         "heterogeneous effect** and flags the segment that disagrees in "

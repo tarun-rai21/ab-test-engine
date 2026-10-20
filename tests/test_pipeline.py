@@ -531,3 +531,30 @@ def test_reseeding_an_experiment_replaces_its_users(isolated_db):
 
     with engine.connect() as conn:
         assert conn.execute(text("SELECT COUNT(*) FROM users")).scalar() == 3000
+
+
+def test_analyze_experiment_persists_srm_check(isolated_db):
+    """
+    Review issue L4: srm_checks existed in the schema but was never
+    written. A persisted analysis now records one row per experiment
+    (replaced on re-analysis); persist=False writes nothing.
+    """
+    engine = isolated_db
+    seed_database({"simulator": {
+        "n_users": 2000, "baseline_rate": 0.10, "true_effect": 0.0,
+        "covariate_correlation": 0.0, "seed": 131, "corrupted_split": 0.6,
+    }}, database_url="sqlite:///:memory:")
+
+    analyze_experiment(engine, "exp_seed131", persist=False)
+    with engine.connect() as conn:
+        assert conn.execute(text("SELECT COUNT(*) FROM srm_checks")).scalar() == 0
+
+    report = analyze_experiment(engine, "exp_seed131")
+    analyze_experiment(engine, "exp_seed131")  # re-analysis replaces, not duplicates
+    with engine.connect() as conn:
+        rows = conn.execute(
+            text("SELECT flagged, p_value FROM srm_checks WHERE experiment_id = 'exp_seed131'")
+        ).fetchall()
+    assert len(rows) == 1
+    assert rows[0].flagged == 1 and report.srm.flagged is True
+    assert rows[0].p_value == pytest.approx(report.srm.p_value)

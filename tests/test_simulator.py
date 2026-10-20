@@ -112,3 +112,22 @@ def test_baseline_rate_within_sampling_noise():
         f"Realized baseline rate {gt.baseline_rate_realized:.4f} vs configured "
         f"{baseline_rate:.4f}, gap={gap:.4f} exceeds 4*SE={tolerance:.4f} ({gap/se:.1f} SE)."
     )
+
+
+def test_segment_effects_realized_reflect_clipping_not_configuration():
+    """
+    Review issue L3: segment_effects_realized used to be a copy of the
+    configured dict. With a 0.10 baseline and a correlated covariate, many
+    users' baseline p is below 0.08, so a -0.08 desktop delta is clipped at
+    p=0 and realizes noticeably smaller in magnitude.
+    """
+    sim = ExperimentSimulator(
+        n_users=20000, baseline_rate=0.10, true_effect=0.0,
+        covariate_correlation=0.5, seed=7,
+        segment_heterogeneity={"device_type": {"mobile": 0.15, "desktop": -0.08}},
+    )
+    _, _, _, gt = sim.generate()
+
+    assert gt.segment_effects_configured == {"mobile": 0.15, "desktop": -0.08}
+    assert gt.segment_effects_realized["mobile"] == pytest.approx(0.15, abs=0.01)
+    assert -0.07 < gt.segment_effects_realized["desktop"] < -0.02

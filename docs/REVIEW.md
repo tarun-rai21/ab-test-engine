@@ -258,13 +258,34 @@ metrics (heavy tails, delta method, winsorization).
 
 ## Remediation log
 
-Each fix is a separate commit on `review-fixes`.
+Each fix landed as a separate commit on `review-fixes`.
 
-| Fix | Issues | Summary |
-|---|---|---|
-| 1 | H1 | Experiment-scoped user IDs; re-seed deletes the experiment's users; two-experiment regression test |
-| 2 | H2 | Calibrated O'Brien-Fleming constant via exact recursive integration; tests and validation band updated |
-| 3 | M1, M2, D3 | Checkpoint units are total users everywhere; beyond-plan looks flagged; plot uses planned schedule; single checkpoint evaluated |
-| 4 | D1 | Reversal flag requires BH significance; UI wording changed from "Simpson's paradox" to effect reversal |
-| 5 | M3, L1, L2 | Upload validation + intended split; API input bounds and 4xx errors; `seed_database` honours `database_url` |
-| 6 | M4, L3, L4 | Realized segment effects computed; seed.py tidy; `.idea` untracked; docs, validation report, notebook regenerated |
+| Fix | Issues | What changed | Evidence |
+|---|---|---|---|
+| 1 | H1 | Experiment-scoped user IDs; re-seeding deletes the experiment's users; uploads prefix user IDs | Two regression tests that fail on the old code (CUPED VR 0.006% → >10%; stale user count 5000 → 3000) |
+| 2 | H2 | O'Brien-Fleming constant solved by exact recursive integration (K=10 → c=2.0865, matches published tables) | Corrected FPR 6.6% → **5.15%** (2000 sims), irregular spacing 4.80%; independent Monte Carlo unit test at 5.0% ± 0.2pp |
+| 3 | M1, M2, D3 | Total-users units for live checks; `beyond_plan` flag; plot uses the planned schedule; single checkpoint evaluated | New unit and pipeline tests |
+| 4 | D1 | `simpsons_flag` → `reversal_flag`, gated on BH significance | Test that a noisy opposite-sign segment is not flagged |
+| 5 | M3, L1, L2 | Upload validation + intended split + bulk inserts; API 422s; URL-keyed engine singleton; per-session Streamlit engine | API, upload and connection tests; headless Streamlit AppTest run with no exceptions |
+| 6 | M4, L3, L4 | Realized segment effects computed after clipping; `srm_checks` persisted; checkpoint threshold stored; `.idea` untracked; README, validation report and notebook regenerated | Full slow suite re-run; notebook now shows desktop −0.089 flagged as a reversal (was +0.056, unflagged) |
+
+### Additional issues found while fixing
+
+- **Upload crashed without all segment columns** (found by Fix 5's tests):
+  `users.device_type/region/existing_customer` were `NOT NULL`, so any CSV
+  missing an "optional" segment column failed with an IntegrityError. Now
+  nullable; segment analysis already drops NULL segment values.
+- **Naive-peeking band floor sat above theory:** the exact null crossing
+  probability for a flat 1.96 at 10 equal looks is ~19.3%, but the test
+  required ≥20%; the old 22.0% was sampling noise at 500 simulations. The
+  band is now centred on theory.
+- **Deprecated Streamlit argument:** `st.dataframe(use_container_width=...)`
+  replaced with `width="stretch"`.
+
+### Still open (design limitations, not bugs)
+
+Index-based (not information-based) look spacing; no segment interaction
+test and BH applied per segment column; binary metric and two arms only;
+no planned-schedule column in the schema; GET `/report` recomputes;
+Streamlit covered by one headless smoke run rather than UI tests;
+Starlette's `httpx` → `httpx2` deprecation warning in the test client.

@@ -143,7 +143,7 @@ class ExperimentSimulator:
         p_baseline = expit(intercept + slope * z)
 
         variant = self._assign_variant(rng)
-        effect_per_user, segment_effects_realized = self._compute_effect_per_user(users_df)
+        effect_per_user = self._compute_effect_per_user(users_df)
 
         p_final = p_baseline.copy()
         is_treatment = variant == "treatment"
@@ -158,6 +158,9 @@ class ExperimentSimulator:
             if is_treatment.any() else 0.0
         )
         realized_corr = float(np.corrcoef(users_df["pre_period_covariate"], converted)[0, 1])
+        segment_effects_realized = self._realized_segment_effects(
+            users_df, is_treatment, p_final - p_baseline
+        )
         realized_baseline_rate = float(p_baseline.mean())
 
         assignments_df = self._build_assignments(users_df["user_id"], variant)
@@ -350,18 +353,36 @@ class ExperimentSimulator:
             ["control", "treatment"], size=self.n_users, p=[1 - treatment_prob, treatment_prob]
         )
 
-    def _compute_effect_per_user(
-        self, users_df: pd.DataFrame
-    ) -> tuple[np.ndarray, dict[str, float] | None]:
+    def _compute_effect_per_user(self, users_df: pd.DataFrame) -> np.ndarray:
         effect = np.full(self.n_users, self.true_effect, dtype=float)
-        segment_effects_realized = None
         if self.segment_column:
             seg_map = self.segment_heterogeneity[self.segment_column]
             segment_values = users_df[self.segment_column].to_numpy()
             segment_delta = np.array([seg_map.get(v, 0.0) for v in segment_values])
             effect = effect + segment_delta
-            segment_effects_realized = dict(seg_map)
-        return effect, segment_effects_realized
+        return effect
+
+    def _realized_segment_effects(
+        self, users_df: pd.DataFrame, is_treatment: np.ndarray, applied_effect: np.ndarray
+    ) -> dict[str, float] | None:
+        """
+        Realized TOTAL treatment effect (true_effect + segment delta) per
+        configured segment value: the mean probability shift actually
+        applied to that segment's treated users, AFTER clipping p to [0, 1].
+
+        This used to be a copy of the configured dict (review issue L3),
+        which hid that clipping can shrink an effect substantially — e.g. a
+        -0.08 delta on a 0.10 baseline with a correlated covariate realizes
+        around -0.044, because many users' baseline p is already below 0.08.
+        """
+        if not self.segment_column:
+            return None
+        segment_values = users_df[self.segment_column].to_numpy()
+        realized = {}
+        for value in self.segment_heterogeneity[self.segment_column]:
+            mask = is_treatment & (segment_values == value)
+            realized[value] = float(applied_effect[mask].mean()) if mask.any() else float("nan")
+        return realized
 
     def _build_assignments(self, user_ids: pd.Series, variant: np.ndarray) -> pd.DataFrame:
         variant_id_map = {

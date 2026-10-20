@@ -28,7 +28,9 @@ from core.inference import raw_ttest_ci
 from core.sequential import SequentialCheckResult, alpha_spending_schedule, checkpoint_position
 
 
-def _insert_checkpoint(engine, experiment_id: str, cumulative_n: int, p_value: float) -> None:
+def _insert_checkpoint(
+    engine, experiment_id: str, cumulative_n: int, p_value: float, alpha_threshold: float
+) -> None:
     with engine.begin() as conn:
         conn.execute(
             text(
@@ -37,7 +39,7 @@ def _insert_checkpoint(engine, experiment_id: str, cumulative_n: int, p_value: f
                     (checkpoint_id, experiment_id, checked_at, cumulative_n,
                      p_value_at_check, alpha_threshold_at_check)
                 VALUES
-                    (:cid, :eid, :checked_at, :cum_n, :pval, 0.05)
+                    (:cid, :eid, :checked_at, :cum_n, :pval, :alpha)
                 """
             ),
             {
@@ -46,6 +48,7 @@ def _insert_checkpoint(engine, experiment_id: str, cumulative_n: int, p_value: f
                 "checked_at": datetime.now(timezone.utc).isoformat(),
                 "cum_n": cumulative_n,
                 "pval": p_value,
+                "alpha": alpha_threshold,
             },
         )
 
@@ -127,7 +130,16 @@ def render_sequential_panel(
             treatment_converted[:checkpoint_n_per_arm],
         )
         cumulative_n = checkpoint_n_per_arm * 2
-        _insert_checkpoint(engine, experiment_id, cumulative_n, prefix_result.p_value)
+        # Record the threshold that actually applied at this look: the
+        # planned schedule's value at this position if a plan is set,
+        # otherwise the naive 0.05 (this used to always store 0.05).
+        alpha_threshold = 0.05
+        if n_checkpoints_planned is not None and checkpoint_n is not None:
+            position, _ = checkpoint_position(cumulative_n, n_checkpoints_planned, checkpoint_n)
+            alpha_threshold = alpha_spending_schedule(n_checkpoints_planned)[position - 1]
+        _insert_checkpoint(
+            engine, experiment_id, cumulative_n, prefix_result.p_value, alpha_threshold
+        )
         st.success(
             f"Logged checkpoint at n={cumulative_n} (n={checkpoint_n_per_arm}/arm), "
             f"p={prefix_result.p_value:.4g}. Re-run analysis to see the updated risk."

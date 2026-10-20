@@ -77,7 +77,7 @@ from core.data_access import (
     split_by_variant,
 )
 from core.inference import InferenceResult, cuped_adjust, raw_ttest_ci, variance_reduction_pct
-from core.persistence import persist_inference_result
+from core.persistence import persist_inference_result, persist_srm_result
 from core.segments import SegmentAnalysisResult, segment_breakdown
 from core.sequential import SequentialCheckResult, sequential_check
 from core.validity import SRMResult, mde_curve, srm_check
@@ -151,6 +151,7 @@ def analyze_experiment(
     raw_effect = raw_ttest_ci(raw_control, raw_treatment)
 
     if persist:
+        persist_srm_result(engine, experiment_id, srm_result)
         persist_inference_result(engine, experiment_id, metric_name, raw_effect, srm_result)
 
     # --- Achievable MDE: context, not a gate. A failure here (e.g. observed
