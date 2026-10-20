@@ -282,9 +282,21 @@ Each fix landed as a separate commit on `review-fixes`.
 - **Deprecated Streamlit argument:** `st.dataframe(use_container_width=...)`
   replaced with `width="stretch"`.
 
+### Follow-up: Lan-DeMets boundary (design concern D4)
+
+Resolved after the review on branch `lan-demets-boundary`:
+`core.sequential.lan_demets_boundary()` computes boundaries from each
+look's information fraction via the same recursive-integration approach,
+with an O'Brien-Fleming-type spending function. It is the default for
+live checks (`spending="lan_demets"`); the index-based schedule stays
+available. Matches published ldbounds values (K=5: z = 4.877, 3.357,
+2.680, 2.290, 2.031) to ~0.001; independent Monte Carlo type-I error
+5.0% ± 0.2pp under irregular spacing; t-test simulation FPR 5.25%
+(equal) and 5.05% (irregular) over 2000 runs.
+
 ### Still open (design limitations, not bugs)
 
-Index-based (not information-based) look spacing; no segment interaction
+No segment interaction
 test and BH applied per segment column; binary metric and two arms only;
 no planned-schedule column in the schema; GET `/report` recomputes;
 Streamlit covered by one headless smoke run rather than UI tests;

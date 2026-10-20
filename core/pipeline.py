@@ -105,6 +105,7 @@ def analyze_experiment(
     checkpoint_n: int | None = None,
     segment_columns: list[str] | None = None,
     persist: bool = True,
+    spending: str = "lan_demets",
 ) -> AnalysisReport:
     """
     Runs the full spec Section 4.4 sequence for one experiment and returns a
@@ -118,6 +119,10 @@ def analyze_experiment(
     peeking check against this experiment's real sequential_checkpoints
     rows. Omit either (or both) to skip it — see design decision 4 above for
     why this can't be inferred automatically from the schema as it stands.
+
+    spending: "lan_demets" (default, information-based — valid for any
+    look timing) or "obrien_fleming" (index-based, exact only for the
+    planned equal spacing). See core.sequential.sequential_check().
 
     segment_columns: pass a list of column names from
     core.data_access.ALLOWED_SEGMENT_COLUMNS (e.g. ["device_type",
@@ -198,7 +203,7 @@ def analyze_experiment(
         checkpoints = get_sequential_checkpoints(engine, experiment_id)
         if checkpoints:
             sequential_risk = sequential_check(
-                checkpoints, n_checkpoints_planned, checkpoint_n
+                checkpoints, n_checkpoints_planned, checkpoint_n, spending=spending
             )
 
     # --- Segment analysis (Phase 6): optional, see design decision 5.

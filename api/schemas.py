@@ -18,6 +18,8 @@ duplicated here — a real, stated scope decision, not a silent gap.
 
 from __future__ import annotations
 
+from typing import Literal
+
 from pydantic import BaseModel, ConfigDict, Field
 
 # ===================================================================== #
@@ -90,6 +92,9 @@ class AnalyzeRequest(BaseModel):
     # TOTAL users across both arms per planned look (same unit as the
     # sequential_checkpoints table's cumulative_n).
     checkpoint_n: int | None = Field(default=None, ge=1)
+    # Peeking correction: "lan_demets" (information-based, any look timing)
+    # or "obrien_fleming" (index-based, planned equal spacing only).
+    spending: Literal["lan_demets", "obrien_fleming"] = "lan_demets"
 
 
 class SRMResultSchema(BaseModel):
@@ -124,6 +129,8 @@ class SequentialCheckResultSchema(BaseModel):
     corrected_significant: bool
     disagreement: bool
     beyond_plan: bool
+    spending: str
+    information_fraction: float | None
     latest_checkpoint_n: int
 
 

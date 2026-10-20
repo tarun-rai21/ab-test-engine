@@ -16,6 +16,8 @@ from scipy.stats import norm
 from core.sequential import (
     alpha_spending_schedule,
     checkpoint_position,
+    lan_demets_boundary,
+    lan_demets_obf_spending,
     sequential_check,
     simulate_peeking_fpr,
 )
@@ -277,3 +279,108 @@ def test_checkpoint_position_maps_total_n_onto_schedule():
     assert checkpoint_position(8000, 10, 400) == (10, True)
     with pytest.raises(ValueError):
         checkpoint_position(400, 10, 0)
+
+
+# --------------------------------------------------------------------- #
+# lan_demets_boundary — information-based alpha spending
+# --------------------------------------------------------------------- #
+
+def test_lan_demets_matches_published_ldbounds_values():
+    """
+    Published two-sided O'Brien-Fleming-type Lan-DeMets boundaries for 5
+    equally spaced looks at alpha=0.05 (R ldbounds / gsDesign):
+    z = 4.8769, 3.3569, 2.6803, 2.2898, 2.0310. The grid recursion is
+    accurate to ~0.001 in z at the default grid step.
+    """
+    thresholds = lan_demets_boundary([0.2, 0.4, 0.6, 0.8, 1.0], total_alpha=0.05)
+    z = norm.isf(np.array(thresholds) / 2)
+    assert z == pytest.approx([4.8769, 3.3569, 2.6803, 2.2898, 2.0310], abs=0.002)
+
+
+def test_lan_demets_controls_type_one_error_under_irregular_spacing():
+    """
+    The reason this boundary exists: alpha_spending_schedule() is only
+    calibrated for equally spaced looks. Independent Monte Carlo on null
+    Brownian paths at deliberately uneven information fractions must still
+    give ~5% overall type-I error.
+    """
+    fractions = np.array([120, 300, 550, 700, 1000, 1250, 1500, 1650, 1800, 2000]) / 2000
+    z_bounds = norm.isf(np.array(lan_demets_boundary(fractions)) / 2)
+
+    rng = np.random.default_rng(0)
+    steps = rng.standard_normal((200_000, len(fractions))) * np.sqrt(
+        np.diff(np.concatenate([[0.0], fractions]))
+    )
+    z = np.cumsum(steps, axis=1) / np.sqrt(fractions)
+    crossed = (np.abs(z) >= z_bounds).any(axis=1).mean()
+
+    assert crossed == pytest.approx(0.05, abs=0.002)
+
+
+def test_lan_demets_past_thresholds_do_not_change_when_looks_are_added():
+    early = lan_demets_boundary([0.1, 0.35])
+    later = lan_demets_boundary([0.1, 0.35, 0.6, 1.0])
+    assert later[:2] == pytest.approx(early, rel=1e-6)
+
+
+def test_lan_demets_single_final_look_spends_full_alpha():
+    assert lan_demets_boundary([1.0]) == pytest.approx((0.05,), abs=1e-12)
+
+
+def test_lan_demets_look_beyond_planned_information_cannot_reject():
+    """Spending is exhausted at t=1, so a look at t=1.2 gets threshold 0."""
+    thresholds = lan_demets_boundary([0.5, 1.0, 1.2])
+    assert thresholds[-1] == 0.0
+    assert thresholds[1] > 0.0
+
+
+def test_lan_demets_spending_function_endpoints():
+    assert lan_demets_obf_spending(1.0, 0.05) == pytest.approx(0.05, abs=1e-12)
+    assert lan_demets_obf_spending(1.5, 0.05) == pytest.approx(0.05, abs=1e-12)
+    assert lan_demets_obf_spending(0.1, 0.05) < 1e-6
+    with pytest.raises(ValueError):
+        lan_demets_obf_spending(0.0)
+
+
+def test_lan_demets_invalid_inputs_raise():
+    with pytest.raises(ValueError):
+        lan_demets_boundary([])
+    with pytest.raises(ValueError):
+        lan_demets_boundary([0.5, 0.5])        # not strictly increasing
+    with pytest.raises(ValueError):
+        lan_demets_boundary([0.0, 0.5])        # non-positive fraction
+    with pytest.raises(ValueError):
+        lan_demets_boundary([0.5, 1.0], total_alpha=1.5)
+
+
+def test_sequential_check_lan_demets_uses_actual_look_times():
+    """
+    Planned 10 looks of 200 total users. Looks actually taken at n=1000
+    and n=2000 (t=0.5, 1.0): the index-based schedule treats n=2000 as
+    position 10 of 10 (threshold ~0.0369, as if 9 earlier looks had spent
+    alpha), whereas Lan-DeMets knows only one earlier look happened and
+    allows a larger final threshold (~0.049).
+    """
+    checkpoints = [
+        {"cumulative_n": 1000, "p_value_at_check": 0.20},
+        {"cumulative_n": 2000, "p_value_at_check": 0.045},
+    ]
+    ld = sequential_check(checkpoints, n_checkpoints_planned=10, checkpoint_n=200)
+    obf = sequential_check(
+        checkpoints, n_checkpoints_planned=10, checkpoint_n=200, spending="obrien_fleming"
+    )
+
+    assert ld.spending == "lan_demets"
+    assert ld.information_fraction == pytest.approx(1.0)
+    assert ld.corrected_threshold == pytest.approx(0.049, abs=0.001)
+    assert ld.corrected_significant is True
+    assert obf.corrected_threshold == pytest.approx(0.0369, abs=0.0005)
+    assert obf.corrected_significant is False
+
+
+def test_sequential_check_rejects_unknown_spending():
+    with pytest.raises(ValueError):
+        sequential_check(
+            [{"cumulative_n": 200, "p_value_at_check": 0.5}],
+            n_checkpoints_planned=10, checkpoint_n=200, spending="pocock",
+        )

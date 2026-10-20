@@ -60,6 +60,7 @@ def analyze(experiment_id: str, request: AnalyzeRequest) -> AnalysisReportSchema
             use_cuped=request.use_cuped,
             n_checkpoints_planned=request.n_checkpoints_planned,
             checkpoint_n=request.checkpoint_n,
+            spending=request.spending,
             segment_columns=request.segment_columns,
             persist=True,
         )
