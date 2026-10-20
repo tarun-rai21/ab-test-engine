@@ -302,3 +302,42 @@ def test_analyze_rejects_unknown_spending_method(client):
         f"/experiments/{experiment_id}/analyze", json={"spending": "pocock"}
     )
     assert response.status_code == 422
+
+
+def test_planned_schedule_can_be_stored_and_drives_the_peeking_check(client):
+    """
+    A schedule stored at creation (or via PUT /schedule) is used by
+    POST /analyze without being re-supplied.
+    """
+    response = client.post("/experiments", json={
+        "name": "scheduled",
+        "schedule": {"n_checkpoints_planned": 10, "checkpoint_n": 200},
+    })
+    assert response.status_code == 200
+    experiment_id = response.json()["experiment_id"]
+    _assign(client, experiment_id)
+
+    engine = get_engine()
+    with engine.begin() as conn:
+        conn.execute(text(
+            "INSERT INTO sequential_checkpoints (checkpoint_id, experiment_id, checked_at, "
+            "cumulative_n, p_value_at_check, alpha_threshold_at_check) "
+            "VALUES ('cp1', :eid, '2025-01-02', 1000, 0.2, 0.05)"
+        ), {"eid": experiment_id})
+
+    report = client.post(f"/experiments/{experiment_id}/analyze", json={}).json()
+    assert report["sequential_risk"]["information_fraction"] == pytest.approx(0.5)
+
+    put = client.put(
+        f"/experiments/{experiment_id}/schedule",
+        json={"n_checkpoints_planned": 5, "checkpoint_n": 200},
+    )
+    assert put.status_code == 200
+    report = client.post(f"/experiments/{experiment_id}/analyze", json={}).json()
+    assert report["sequential_risk"]["information_fraction"] == pytest.approx(1.0)
+
+    missing = client.put(
+        "/experiments/does_not_exist/schedule",
+        json={"n_checkpoints_planned": 5, "checkpoint_n": 200},
+    )
+    assert missing.status_code == 404

@@ -35,15 +35,14 @@ DESIGN DECISIONS, made explicit here rather than left implicit in code:
    in tests/test_data_access.py's
    test_full_pipeline_cuped_variance_reduction_matches_theory.
 
-4. Sequential-peeking check is genuinely optional. The schema has no column
-   anywhere that stores an experiment's PLANNED checkpoint schedule
-   (n_checkpoints_planned, checkpoint_n) — so these are accepted as
-   optional caller-supplied parameters. If omitted, or if no checkpoint
-   rows exist yet, sequential_risk is simply None in the report. A single
-   checkpoint IS evaluated: the first look is the most noise-prone one, so
-   skipping it would hide exactly the risk this check exists for.
+4. Sequential-peeking check is optional. The planned schedule
+   (n_checkpoints_planned, checkpoint_n) is read from the experiments
+   table when stored there (core.data_access.save_planned_schedule), and
+   explicit caller-supplied values override it. With no schedule from
+   either source, or no checkpoint rows yet, sequential_risk is None. A
+   single checkpoint IS evaluated: the first look is the most noise-prone
+   one, so skipping it would hide exactly the risk this check exists for.
    checkpoint_n and the stored cumulative_n are TOTAL users across arms.
-   This is a real, honest schema gap surfaced here, not papered over.
 
 5. Segment analysis (Phase 6) is optional, driven by an explicit
    segment_columns parameter — one SegmentAnalysisResult per requested
@@ -72,6 +71,7 @@ from sqlalchemy import Engine
 
 from core.data_access import (
     get_inference_data,
+    get_planned_schedule,
     get_sequential_checkpoints,
     get_variant_counts,
     split_by_variant,
@@ -115,10 +115,10 @@ def analyze_experiment(
     (useful for pure computation in tests, or a caller that wants to
     inspect a report before committing it).
 
-    n_checkpoints_planned / checkpoint_n: pass BOTH to enable the sequential-
-    peeking check against this experiment's real sequential_checkpoints
-    rows. Omit either (or both) to skip it — see design decision 4 above for
-    why this can't be inferred automatically from the schema as it stands.
+    n_checkpoints_planned / checkpoint_n: pass BOTH to run the sequential-
+    peeking check with this schedule. Omit both to use the schedule stored
+    on the experiment, if any (see design decision 4); passing only one is
+    a ValueError.
 
     spending: "lan_demets" (default, information-based — valid for any
     look timing) or "obrien_fleming" (index-based, exact only for the
@@ -199,6 +199,15 @@ def analyze_experiment(
 
     # --- Sequential-peeking check: optional, see design decision 4.
     sequential_risk: SequentialCheckResult | None = None
+    if (n_checkpoints_planned is None) != (checkpoint_n is None):
+        raise ValueError(
+            "Pass both n_checkpoints_planned and checkpoint_n, or neither (to use "
+            "the schedule stored on the experiment)."
+        )
+    if n_checkpoints_planned is None:
+        stored_schedule = get_planned_schedule(engine, experiment_id)
+        if stored_schedule is not None:
+            n_checkpoints_planned, checkpoint_n = stored_schedule
     if n_checkpoints_planned is not None and checkpoint_n is not None:
         checkpoints = get_sequential_checkpoints(engine, experiment_id)
         if checkpoints:

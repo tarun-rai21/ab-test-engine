@@ -21,7 +21,12 @@ CREATE TABLE IF NOT EXISTS experiments (
     hypothesis     TEXT,
     start_date     DATE NOT NULL,
     end_date       DATE,
-    status         TEXT NOT NULL DEFAULT 'running'      -- 'running' | 'stopped' | 'analyzed'
+    status         TEXT NOT NULL DEFAULT 'running',     -- 'running' | 'stopped' | 'analyzed'
+    -- Planned sequential-monitoring schedule (optional): n_checkpoints_planned
+    -- looks of checkpoint_n TOTAL users (both arms). Their product is the
+    -- planned total sample size the Lan-DeMets boundary spends alpha against.
+    n_checkpoints_planned  INTEGER,
+    checkpoint_n           INTEGER
 );
 
 CREATE TABLE IF NOT EXISTS variants (

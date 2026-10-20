@@ -31,6 +31,12 @@ class VariantCreateRequest(BaseModel):
     split_pct: float = Field(ge=0.0, le=1.0)
 
 
+class PlannedScheduleRequest(BaseModel):
+    """Planned sequential-monitoring schedule; checkpoint_n is TOTAL users (both arms)."""
+    n_checkpoints_planned: int = Field(ge=1)
+    checkpoint_n: int = Field(ge=1)
+
+
 class ExperimentCreateRequest(BaseModel):
     name: str
     hypothesis: str = ""
@@ -40,6 +46,7 @@ class ExperimentCreateRequest(BaseModel):
             VariantCreateRequest(name="treatment", split_pct=0.5),
         ]
     )
+    schedule: PlannedScheduleRequest | None = None
 
 
 class ExperimentCreateResponse(BaseModel):

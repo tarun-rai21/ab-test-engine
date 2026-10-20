@@ -28,7 +28,12 @@ from app.components.segment_panel import render_segment_panel
 from app.components.sequential_panel import render_sequential_panel
 from app.components.upload_or_generate import get_session_engine, render_data_input
 from app.components.validity_panel import render_validity_panel
-from core.data_access import ALLOWED_SEGMENT_COLUMNS, get_inference_data, split_by_variant
+from core.data_access import (
+    ALLOWED_SEGMENT_COLUMNS,
+    get_inference_data,
+    save_planned_schedule,
+    split_by_variant,
+)
 from core.pipeline import analyze_experiment
 
 st.set_page_config(page_title="A/B Test Analysis Engine", layout="wide")
@@ -90,6 +95,11 @@ with col3:
 if st.button("▶️ Run analysis", type="primary"):
     engine = get_session_engine()
     try:
+        if enable_sequential:
+            # Store the plan on the experiment so it travels with the data.
+            save_planned_schedule(
+                engine, experiment_id, int(n_checkpoints_planned), int(checkpoint_n)
+            )
         report = analyze_experiment(
             engine,
             experiment_id,

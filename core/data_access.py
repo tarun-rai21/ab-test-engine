@@ -225,3 +225,54 @@ def get_sequential_checkpoints(engine: Engine, experiment_id: str) -> list[dict]
         {"cumulative_n": int(row.cumulative_n), "p_value_at_check": float(row.p_value_at_check)}
         for row in rows
     ]
+
+
+def get_planned_schedule(engine: Engine, experiment_id: str) -> tuple[int, int] | None:
+    """
+    Returns the experiment's stored (n_checkpoints_planned, checkpoint_n),
+    or None if no schedule was stored (either column NULL) or the
+    experiment doesn't exist. checkpoint_n is TOTAL users across arms.
+    """
+    query = text(
+        """
+        SELECT n_checkpoints_planned, checkpoint_n
+        FROM experiments
+        WHERE experiment_id = :experiment_id
+        """
+    )
+    with engine.connect() as conn:
+        row = conn.execute(query, {"experiment_id": experiment_id}).fetchone()
+
+    if row is None or row.n_checkpoints_planned is None or row.checkpoint_n is None:
+        return None
+    return int(row.n_checkpoints_planned), int(row.checkpoint_n)
+
+
+def save_planned_schedule(
+    engine: Engine, experiment_id: str, n_checkpoints_planned: int, checkpoint_n: int
+) -> None:
+    """
+    Stores the experiment's planned sequential-monitoring schedule, so later
+    analyses can run the peeking check without the caller re-supplying it.
+    Raises ValueError for non-positive values or an unknown experiment.
+    """
+    if n_checkpoints_planned < 1 or checkpoint_n < 1:
+        raise ValueError(
+            f"n_checkpoints_planned and checkpoint_n must be >= 1, got "
+            f"{n_checkpoints_planned} and {checkpoint_n}"
+        )
+    query = text(
+        """
+        UPDATE experiments
+        SET n_checkpoints_planned = :n_planned, checkpoint_n = :checkpoint_n
+        WHERE experiment_id = :experiment_id
+        """
+    )
+    with engine.begin() as conn:
+        result = conn.execute(query, {
+            "n_planned": n_checkpoints_planned,
+            "checkpoint_n": checkpoint_n,
+            "experiment_id": experiment_id,
+        })
+    if result.rowcount == 0:
+        raise ValueError(f"No experiment found with experiment_id={experiment_id!r}.")

@@ -19,9 +19,10 @@ from api.schemas import (
     AssignResponse,
     ExperimentCreateRequest,
     ExperimentCreateResponse,
+    PlannedScheduleRequest,
     SRMCheckSummary,
 )
-from core.data_access import get_variant_counts
+from core.data_access import get_variant_counts, save_planned_schedule
 from core.validity import srm_check
 from db.connection import get_engine
 from db.seed import seed_assignments_for_existing_experiment
@@ -97,7 +98,29 @@ def create_experiment(request: ExperimentCreateRequest) -> ExperimentCreateRespo
                 },
             )
 
+    if request.schedule is not None:
+        save_planned_schedule(
+            engine, experiment_id,
+            request.schedule.n_checkpoints_planned, request.schedule.checkpoint_n,
+        )
+
     return ExperimentCreateResponse(experiment_id=experiment_id, status="created")
+
+
+@router.put("/{experiment_id}/schedule", response_model=PlannedScheduleRequest)
+def set_schedule(experiment_id: str, request: PlannedScheduleRequest) -> PlannedScheduleRequest:
+    """
+    Stores (or replaces) the experiment's planned sequential-monitoring
+    schedule, so POST /analyze can run the peeking check without the
+    caller re-supplying it on every request.
+    """
+    try:
+        save_planned_schedule(
+            get_engine(), experiment_id, request.n_checkpoints_planned, request.checkpoint_n
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return request
 
 
 @router.post("/{experiment_id}/assign", response_model=AssignResponse)

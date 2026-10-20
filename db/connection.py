@@ -16,7 +16,7 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
-from sqlalchemy import Engine, create_engine, text
+from sqlalchemy import Engine, create_engine, inspect, text
 from sqlalchemy.pool import StaticPool
 
 SCHEMA_PATH = Path(__file__).parent / "schema.sql"
@@ -95,6 +95,27 @@ def init_schema(engine: Engine | None = None) -> None:
     with engine.begin() as conn:
         for statement in _split_statements(ddl):
             conn.execute(text(statement))
+        _apply_column_migrations(conn)
+
+
+# Columns added to tables AFTER their first release. CREATE TABLE IF NOT
+# EXISTS never alters an existing table, so a database created by an older
+# version (e.g. a local.db from before these columns existed) needs them
+# added explicitly. Each entry is (table, column, SQL type); schema.sql
+# remains the source of truth and must declare the same columns.
+_COLUMN_MIGRATIONS: tuple[tuple[str, str, str], ...] = (
+    ("experiments", "n_checkpoints_planned", "INTEGER"),
+    ("experiments", "checkpoint_n", "INTEGER"),
+)
+
+
+def _apply_column_migrations(conn) -> None:
+    """Adds any _COLUMN_MIGRATIONS column missing from an existing table."""
+    inspector = inspect(conn)
+    for table, column, sql_type in _COLUMN_MIGRATIONS:
+        existing = {c["name"] for c in inspector.get_columns(table)}
+        if column not in existing:
+            conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {column} {sql_type}"))
 
 
 def _split_statements(ddl: str) -> list[str]:
