@@ -97,3 +97,20 @@ def test_validate_upload_rejects_bad_revenue():
     assert any("converted = 1" in e for e in validate_upload(df))
     df["revenue"] = -1.0
     assert any("non-negative" in e for e in validate_upload(df))
+
+
+def test_upload_with_extra_treatment_arm():
+    df = pd.concat([_valid_df(), _valid_df().assign(variant_id="x_treatment_b").iloc[50:]])
+    assert validate_upload(df) == []
+
+    engine = create_memory_engine()
+    ingest_upload(engine, df, "exp_abn", treatment_split=0.5)
+    report = analyze_experiment(engine, "exp_abn", persist=False)
+
+    assert [c.treatment_arm for c in report.comparisons] == ["treatment", "treatment_b"]
+    assert report.srm.expected_counts == pytest.approx((75.0, 37.5, 37.5))
+
+
+def test_validate_upload_requires_control_and_an_arm():
+    df = _valid_df().assign(variant_id="x_control")
+    assert any("control group and at least one" in e for e in validate_upload(df))

@@ -32,7 +32,7 @@ from core.data_access import (
     ALLOWED_SEGMENT_COLUMNS,
     get_inference_data,
     save_planned_schedule,
-    split_by_variant,
+    split_arms,
 )
 from core.metrics import METRICS
 from core.pipeline import analyze_experiment
@@ -145,10 +145,15 @@ st.divider()
 render_validity_panel(report.srm, report.achievable_mde, report.metric_name)
 st.divider()
 
-render_effect_panel(report.raw_effect, report.cuped_effect, report.cuped_variance_reduction_pct)
+render_effect_panel(
+    report.raw_effect, report.cuped_effect, report.cuped_variance_reduction_pct,
+    comparisons=report.comparisons,
+)
 st.divider()
 
-control_df, treatment_df = split_by_variant(get_inference_data(get_session_engine(), experiment_id))
+# Checkpoint p-values are logged for the primary comparison (first arm).
+control_df, arm_dfs = split_arms(get_inference_data(get_session_engine(), experiment_id))
+treatment_df = next(iter(arm_dfs.values()))
 
 render_sequential_panel(
     get_session_engine(),

@@ -139,6 +139,8 @@ def seed_database(
         revenue_mean=sim_cfg.get("revenue_mean"),
         revenue_lift=sim_cfg.get("revenue_lift", 0.0),
         revenue_sigma=sim_cfg.get("revenue_sigma", 1.0),
+        treatment_arms=sim_cfg.get("treatment_arms"),
+        allocation=sim_cfg.get("allocation"),
     )
 
     users_df, assignments_df, events_df, ground_truth = sim.generate()
@@ -148,8 +150,8 @@ def seed_database(
 
     _delete_existing_experiment(engine, sim.experiment_id)
 
-    # CRITICAL: split_pct records the INTENDED design split — always 50/50 for
-    # this project's scope — NEVER the corrupted_split value. corrupted_split
+    # CRITICAL: split_pct records the INTENDED design split (the simulator's
+    # allocation, equal shares by default) — NEVER the corrupted_split value. corrupted_split
     # simulates a randomization BUG that causes actual traffic to deviate from
     # this intended split; it must not also overwrite what the system believes
     # was intended, or SRM's observed-vs-expected comparison becomes a
@@ -158,7 +160,7 @@ def seed_database(
     # This was a REAL bug, found via test_full_pipeline_detects_corrupted_split:
     # a 55/45 corrupted split was NOT flagged because variants.split_pct had
     # ALSO been set to 0.55/0.45, so SRM correctly found observed≈expected.
-    intended_treatment_pct = 0.5
+    intended_split = sim.intended_allocation()
 
     experiments_df = pd.DataFrame([{
         "experiment_id": sim.experiment_id,
@@ -170,10 +172,9 @@ def seed_database(
     }])
 
     variants_df = pd.DataFrame([
-        {"variant_id": f"{sim.experiment_id}_control", "experiment_id": sim.experiment_id,
-         "name": "control", "split_pct": 1 - intended_treatment_pct},
-        {"variant_id": f"{sim.experiment_id}_treatment", "experiment_id": sim.experiment_id,
-         "name": "treatment", "split_pct": intended_treatment_pct},
+        {"variant_id": f"{sim.experiment_id}_{name}", "experiment_id": sim.experiment_id,
+         "name": name, "split_pct": share}
+        for name, share in intended_split.items()
     ])
 
     users_df = coerce_for_sqlite(users_df)
@@ -243,6 +244,8 @@ def seed_assignments_for_existing_experiment(
         revenue_mean=sim_cfg.get("revenue_mean"),
         revenue_lift=sim_cfg.get("revenue_lift", 0.0),
         revenue_sigma=sim_cfg.get("revenue_sigma", 1.0),
+        treatment_arms=sim_cfg.get("treatment_arms"),
+        allocation=sim_cfg.get("allocation"),
     )
     users_df, assignments_df, events_df, ground_truth = sim.generate()
 

@@ -67,6 +67,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, replace
 
+import pandas as pd
 from sqlalchemy import Engine
 
 from core.data_access import (
@@ -74,7 +75,7 @@ from core.data_access import (
     get_planned_schedule,
     get_sequential_checkpoints,
     get_variant_counts,
-    split_by_variant,
+    split_arms,
 )
 from core.inference import InferenceResult, cuped_adjust, raw_ttest_ci, variance_reduction_pct
 from core.metrics import (
@@ -84,6 +85,7 @@ from core.metrics import (
     validate_metric,
     winsorization_cap,
 )
+from core.multiple_testing import holm_adjust
 from core.persistence import persist_inference_result, persist_srm_result
 from core.segments import SegmentAnalysisResult, segment_breakdown
 from core.sequential import SequentialCheckResult, sequential_check
@@ -91,7 +93,24 @@ from core.validity import SRMResult, achievable_mde_from_se, mde_curve, srm_chec
 
 
 @dataclass(frozen=True)
+class ArmComparison:
+    """One treatment arm vs control. Holm-adjusted p-values control the
+    family-wise error rate across all arms (equal to the raw p-value when
+    there is a single arm)."""
+    treatment_arm: str
+    raw_effect: InferenceResult
+    raw_p_value_holm: float
+    cuped_effect: InferenceResult | None
+    cuped_p_value_holm: float | None
+
+
+@dataclass(frozen=True)
 class AnalysisReport:
+    """
+    raw_effect / cuped_effect are the PRIMARY comparison: the only arm in a
+    two-arm experiment, or the first treatment arm by name in an A/B/n
+    experiment. `comparisons` holds every arm vs control.
+    """
     experiment_id: str
     metric_name: str
     srm: SRMResult
@@ -102,6 +121,7 @@ class AnalysisReport:
     sequential_risk: SequentialCheckResult | None
     segments: tuple[SegmentAnalysisResult, ...] | None  # None if segment_columns not requested
     winsorization_cap: float | None = None  # revenue_per_user cap applied, if any
+    comparisons: tuple[ArmComparison, ...] = ()  # every treatment arm vs control
 
 
 def analyze_experiment(
@@ -159,32 +179,50 @@ def analyze_experiment(
     df = get_inference_data(
         engine, experiment_id, segment_columns=segment_columns or []
     )
-    control_df, treatment_df = split_by_variant(df)
+    control_df, arms = split_arms(df)
+    multi_arm = len(arms) > 1
+    # Two-arm results keep their original persisted keys (variant "pooled");
+    # with several arms each comparison is keyed by its arm's variant_id.
+    arm_variant_ids = {
+        arm: (arm_df["variant_id"].iloc[0] if multi_arm else None)
+        for arm, arm_df in arms.items()
+    }
 
     cap = winsorization_cap(df, metric_name, winsorize_quantile)
-    raw_effect = estimate_effect(control_df, treatment_df, metric_name, cap)
+    raw_by_arm = {
+        arm: estimate_effect(control_df, arm_df, metric_name, cap)
+        for arm, arm_df in arms.items()
+    }
+    raw_holm = dict(zip(raw_by_arm, holm_adjust([r.p_value for r in raw_by_arm.values()])))
 
     if persist:
         persist_srm_result(engine, experiment_id, srm_result)
-        persist_inference_result(engine, experiment_id, metric_name, raw_effect, srm_result)
+        for arm, result in raw_by_arm.items():
+            persist_inference_result(
+                engine, experiment_id, metric_name, result, srm_result,
+                variant_id=arm_variant_ids[arm],
+            )
 
     # --- Achievable MDE: context, not a gate. A failure here (e.g. observed
     # baseline_rate is exactly 0 or 1) should not take down the whole report.
     # Conversion uses the exact two-proportion inversion; continuous and
-    # ratio metrics use the realized standard error.
+    # ratio metrics use the realized standard error. With several arms the
+    # least-powered comparison (smallest arm / largest SE) is reported.
     achievable_mde: float | None
     try:
         if metric_name == "conversion":
             baseline_rate_observed = float(control_df["converted"].mean())
-            n_per_variant = min(len(control_df), len(treatment_df))
+            n_per_variant = min(len(control_df), *(len(a) for a in arms.values()))
             achievable_mde = mde_curve(baseline_rate_observed, [n_per_variant])[0]
         else:
-            achievable_mde = achievable_mde_from_se(raw_effect.standard_error)
+            achievable_mde = achievable_mde_from_se(
+                max(r.standard_error for r in raw_by_arm.values())
+            )
     except ValueError:
         achievable_mde = None
 
     # --- CUPED: optional, and itself fault-tolerant for the same reason.
-    cuped_effect: InferenceResult | None = None
+    cuped_by_arm: dict[str, InferenceResult] = {}
     cuped_vr: float | None = None
     # Ratio metrics have no per-user additive outcome to adjust, so CUPED
     # applies to mean metrics only.
@@ -195,23 +233,29 @@ def analyze_experiment(
             adj = cuped_adjust(y, x)  # theta estimated on the POOLED sample — see decision 3
 
             df_adjusted = df.copy()
-            df_adjusted["converted_cuped"] = adj.y_adjusted
-            control_adj, treatment_adj = split_by_variant(df_adjusted)
-
-            cuped_raw = raw_ttest_ci(
-                control_adj["converted_cuped"].to_numpy(dtype=float),
-                treatment_adj["converted_cuped"].to_numpy(dtype=float),
-            )
-            cuped_effect = replace(cuped_raw, method="cuped")
+            df_adjusted["outcome_cuped"] = adj.y_adjusted
+            control_adj, arms_adj = split_arms(df_adjusted)
+            for arm, arm_adj in arms_adj.items():
+                cuped_raw = raw_ttest_ci(
+                    control_adj["outcome_cuped"].to_numpy(dtype=float),
+                    arm_adj["outcome_cuped"].to_numpy(dtype=float),
+                )
+                cuped_by_arm[arm] = replace(cuped_raw, method="cuped")
             cuped_vr = variance_reduction_pct(y, adj.y_adjusted)
 
             if persist:
-                persist_inference_result(
-                    engine, experiment_id, metric_name, cuped_effect, srm_result
-                )
+                for arm, result in cuped_by_arm.items():
+                    persist_inference_result(
+                        engine, experiment_id, metric_name, result, srm_result,
+                        variant_id=arm_variant_ids[arm],
+                    )
         except ValueError:
-            cuped_effect = None
+            cuped_by_arm = {}
             cuped_vr = None
+    cuped_holm = (
+        dict(zip(cuped_by_arm, holm_adjust([r.p_value for r in cuped_by_arm.values()])))
+        if cuped_by_arm else {}
+    )
 
     # --- Sequential-peeking check: optional, see design decision 4.
     sequential_risk: SequentialCheckResult | None = None
@@ -231,42 +275,61 @@ def analyze_experiment(
                 checkpoints, n_checkpoints_planned, checkpoint_n, spending=spending
             )
 
-    # --- Segment analysis (Phase 6): optional, see design decision 5.
+    # --- Segment analysis (Phase 6): optional, see design decision 5. Run
+    # for every treatment arm against control.
     segments: tuple[SegmentAnalysisResult, ...] | None = None
     if segment_columns:
         segment_results = []
-        for column in segment_columns:
-            try:
-                analysis = segment_breakdown(
-                    df, column, pooled_point_estimate=raw_effect.point_estimate,
-                    estimator=lambda c, t: estimate_effect(c, t, metric_name, cap),
-                )
-            except ValueError:
-                # This ONE column's segment analysis failed (e.g. every
-                # segment value had insufficient data) — skip it, don't
-                # take down the rest of the report or the other columns.
-                continue
-
-            segment_results.append(analysis)
-
-            if persist:
-                for segment_result in analysis.segments:
-                    persist_inference_result(
-                        engine, experiment_id, metric_name, segment_result.inference,
-                        srm_result, segment=f"{column}:{segment_result.segment_value}",
+        for arm, arm_df in arms.items():
+            arm_vs_control = pd.concat([control_df, arm_df])
+            for column in segment_columns:
+                try:
+                    analysis = segment_breakdown(
+                        arm_vs_control, column,
+                        pooled_point_estimate=raw_by_arm[arm].point_estimate,
+                        estimator=lambda c, t: estimate_effect(c, t, metric_name, cap),
                     )
+                except ValueError:
+                    # This ONE column's segment analysis failed (e.g. every
+                    # segment value had insufficient data) — skip it, don't
+                    # take down the rest of the report or the other columns.
+                    continue
+
+                analysis = replace(analysis, treatment_arm=arm)
+                segment_results.append(analysis)
+
+                if persist:
+                    for segment_result in analysis.segments:
+                        persist_inference_result(
+                            engine, experiment_id, metric_name, segment_result.inference,
+                            srm_result, segment=f"{column}:{segment_result.segment_value}",
+                            variant_id=arm_variant_ids[arm],
+                        )
 
         segments = tuple(segment_results) if segment_results else None
+
+    comparisons = tuple(
+        ArmComparison(
+            treatment_arm=arm,
+            raw_effect=raw_by_arm[arm],
+            raw_p_value_holm=raw_holm[arm],
+            cuped_effect=cuped_by_arm.get(arm),
+            cuped_p_value_holm=cuped_holm.get(arm),
+        )
+        for arm in arms
+    )
+    primary = comparisons[0]
 
     return AnalysisReport(
         experiment_id=experiment_id,
         metric_name=metric_name,
         srm=srm_result,
         achievable_mde=achievable_mde,
-        raw_effect=raw_effect,
-        cuped_effect=cuped_effect,
+        raw_effect=primary.raw_effect,
+        cuped_effect=primary.cuped_effect,
         cuped_variance_reduction_pct=cuped_vr,
         sequential_risk=sequential_risk,
         segments=segments,
         winsorization_cap=cap,
+        comparisons=comparisons,
     )

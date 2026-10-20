@@ -27,7 +27,8 @@ def render_segment_panel(segments: tuple[SegmentAnalysisResult, ...] | None) -> 
         return
 
     for analysis in segments:
-        st.markdown(f"**By `{analysis.segment_column}`**")
+        arm_label = f" — `{analysis.treatment_arm}` vs control" if analysis.treatment_arm else ""
+        st.markdown(f"**By `{analysis.segment_column}`{arm_label}**")
 
         any_reversal = any(s.reversal_flag for s in analysis.segments)
         if any_reversal:

@@ -166,21 +166,34 @@ def assign(experiment_id: str, request: AssignRequest) -> AssignResponse:
         )
 
     with engine.connect() as conn:
-        variant_names = conn.execute(
-            text("SELECT name FROM variants WHERE experiment_id = :eid"),
+        variant_splits = dict(conn.execute(
+            text("SELECT name, split_pct FROM variants WHERE experiment_id = :eid"),
             {"eid": experiment_id},
-        ).scalars().all()
-    if "control" not in variant_names or "treatment" not in variant_names:
+        ).fetchall())
+    variant_names = sorted(variant_splits)
+    arm_names = [name for name in variant_names if name != "control"]
+    if "control" not in variant_splits or not arm_names:
         raise HTTPException(
             status_code=400,
             detail=(
-                f"Experiment {experiment_id!r} does not have both a 'control' and "
-                f"'treatment' variant (found: {variant_names}). The simulator "
-                f"requires exactly these two variant names to generate data — "
-                f"create the experiment with variants named 'control' and "
-                f"'treatment' to use mode='simulate'."
+                f"Experiment {experiment_id!r} needs a variant named 'control' and at "
+                f"least one treatment variant (found: {variant_names}). Generated "
+                f"assignments reference variant_ids built from these names."
             ),
         )
+    unknown_arms = set(request.arm_effects or {}) - set(arm_names)
+    if unknown_arms:
+        raise HTTPException(
+            status_code=422,
+            detail=f"arm_effects names {sorted(unknown_arms)} are not treatment variants "
+                   f"of this experiment ({arm_names}).",
+        )
+    # Every arm gets true_effect unless arm_effects overrides it; users are
+    # allocated by the experiment's declared split_pct values (the design),
+    # so an unequal design like 90/10 is simulated as intended.
+    treatment_arms = {
+        name: (request.arm_effects or {}).get(name, request.true_effect) for name in arm_names
+    }
 
     sim_cfg = {
         "n_users": request.n_users,
@@ -193,6 +206,8 @@ def assign(experiment_id: str, request: AssignRequest) -> AssignResponse:
         "revenue_mean": request.revenue_mean,
         "revenue_lift": request.revenue_lift,
         "revenue_sigma": request.revenue_sigma,
+        "treatment_arms": treatment_arms,
+        "allocation": variant_splits,
     }
     try:
         seed_assignments_for_existing_experiment(experiment_id, sim_cfg)

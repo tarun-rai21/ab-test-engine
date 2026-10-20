@@ -78,6 +78,9 @@ class AssignRequest(BaseModel):
     revenue_mean: float | None = Field(default=None, gt=0.0)
     revenue_lift: float = Field(default=0.0, gt=-1.0)
     revenue_sigma: float = Field(default=1.0, gt=0.0)
+    # Per-arm true effects for A/B/n experiments, keyed by treatment variant
+    # name; arms not listed get true_effect.
+    arm_effects: dict[str, float] | None = None
 
 
 class SRMCheckSummary(BaseModel):
@@ -162,6 +165,16 @@ class SegmentAnalysisResultSchema(BaseModel):
     pooled_point_estimate: float
     segments: tuple[SegmentResultSchema, ...]
     excluded_segments: tuple[str, ...]
+    treatment_arm: str | None = None
+
+
+class ArmComparisonSchema(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    treatment_arm: str
+    raw_effect: InferenceResultSchema
+    raw_p_value_holm: float
+    cuped_effect: InferenceResultSchema | None
+    cuped_p_value_holm: float | None
 
 
 class AnalysisReportSchema(BaseModel):
@@ -181,3 +194,4 @@ class AnalysisReportSchema(BaseModel):
     sequential_risk: SequentialCheckResultSchema | None
     segments: tuple[SegmentAnalysisResultSchema, ...] | None
     winsorization_cap: float | None = None
+    comparisons: tuple[ArmComparisonSchema, ...] = ()

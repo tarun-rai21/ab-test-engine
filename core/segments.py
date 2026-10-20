@@ -137,6 +137,7 @@ class SegmentAnalysisResult:
     pooled_point_estimate: float
     segments: tuple[SegmentResult, ...]
     excluded_segments: tuple[str, ...]  # segment values skipped for insufficient data
+    treatment_arm: str | None = None  # which arm was compared with control
 
 
 def segment_breakdown(
