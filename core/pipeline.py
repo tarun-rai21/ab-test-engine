@@ -87,7 +87,7 @@ from core.metrics import (
 )
 from core.multiple_testing import holm_adjust
 from core.persistence import persist_inference_result, persist_srm_result
-from core.segments import SegmentAnalysisResult, segment_breakdown
+from core.segments import SegmentAnalysisResult, apply_global_bh, segment_breakdown
 from core.sequential import SequentialCheckResult, sequential_check
 from core.validity import SRMResult, achievable_mde_from_se, mde_curve, srm_check
 
@@ -306,7 +306,9 @@ def analyze_experiment(
                             variant_id=arm_variant_ids[arm],
                         )
 
-        segments = tuple(segment_results) if segment_results else None
+        # One BH procedure across every column x arm tested, not one per
+        # column (see core.segments.apply_global_bh).
+        segments = apply_global_bh(tuple(segment_results)) if segment_results else None
 
     comparisons = tuple(
         ArmComparison(

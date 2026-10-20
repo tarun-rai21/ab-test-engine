@@ -20,9 +20,11 @@ core/inference.py, core/validity.py, and core/sequential.py.
 from __future__ import annotations
 
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
+import numpy as np
 import pandas as pd
+from scipy.stats import chi2
 
 from core.data_access import split_by_variant
 from core.inference import InferenceResult, raw_ttest_ci
@@ -138,6 +140,10 @@ class SegmentAnalysisResult:
     segments: tuple[SegmentResult, ...]
     excluded_segments: tuple[str, ...]  # segment values skipped for insufficient data
     treatment_arm: str | None = None  # which arm was compared with control
+    # Cochran's Q test of "all segment effects are equal" (None if fewer
+    # than 2 segments could be estimated). See heterogeneity_test().
+    heterogeneity_q: float | None = None
+    heterogeneity_p_value: float | None = None
 
 
 def segment_breakdown(
@@ -228,9 +234,86 @@ def segment_breakdown(
         for i, (value, inference) in enumerate(per_segment)
     )
 
+    q_stat: float | None = None
+    q_p_value: float | None = None
+    if len(per_segment) >= 2:
+        q_stat, q_p_value = heterogeneity_test(
+            [inference.point_estimate for _, inference in per_segment],
+            [inference.standard_error for _, inference in per_segment],
+        )
+
     return SegmentAnalysisResult(
         segment_column=segment_column,
         pooled_point_estimate=pooled_point_estimate,
         segments=segments,
         excluded_segments=tuple(excluded),
+        heterogeneity_q=q_stat,
+        heterogeneity_p_value=q_p_value,
+    )
+
+
+def heterogeneity_test(
+    estimates: list[float], standard_errors: list[float]
+) -> tuple[float, float]:
+    """
+    Cochran's Q test of effect heterogeneity across k segments: are the
+    segment-level treatment effects all equal?
+
+        w_i = 1 / SE_i^2,   theta_bar = sum(w_i * theta_i) / sum(w_i)
+        Q = sum(w_i * (theta_i - theta_bar)^2)  ~  chi^2 with k - 1 df
+
+    This answers the question per-segment tests cannot: a segment being
+    "significant" while another is not does NOT show their effects differ
+    (one may simply have less data). Q tests the difference directly; it is
+    equivalent to the Wald test of the treatment x segment interaction in a
+    stratified model. Segments are disjoint, so their estimates are
+    independent, as the test requires.
+
+    Returns (Q, p_value). Low power with few, noisy segments — a large
+    p-value is not evidence of homogeneity.
+    """
+    theta = np.asarray(estimates, dtype=float)
+    se = np.asarray(standard_errors, dtype=float)
+    if len(theta) != len(se) or len(theta) < 2:
+        raise ValueError("Need at least 2 segments with matching estimates and standard errors")
+    if np.any(se <= 0) or np.any(np.isnan(se)):
+        raise ValueError(f"standard_errors must be positive, got {standard_errors}")
+
+    weights = 1.0 / se**2
+    pooled = np.sum(weights * theta) / np.sum(weights)
+    q = float(np.sum(weights * (theta - pooled) ** 2))
+    return q, float(chi2.sf(q, df=len(theta) - 1))
+
+
+def apply_global_bh(
+    analyses: tuple[SegmentAnalysisResult, ...], fdr: float = DEFAULT_FDR
+) -> tuple[SegmentAnalysisResult, ...]:
+    """
+    Re-applies Benjamini-Hochberg ONCE across every segment-level test in
+    `analyses` — all segment columns and all treatment arms together —
+    and recomputes each segment's bh_significant and reversal_flag.
+
+    segment_breakdown() corrects within its own column only, so analysing
+    three columns (or two arms) ran several separate BH procedures and the
+    false discovery rate across the whole report was not controlled. The
+    pipeline therefore calls this after collecting every analysis.
+    """
+    flat = [(a_idx, s_idx, seg) for a_idx, analysis in enumerate(analyses)
+            for s_idx, seg in enumerate(analysis.segments)]
+    if not flat:
+        return analyses
+    flags = benjamini_hochberg([seg.inference.p_value for _, _, seg in flat], fdr=fdr)
+
+    updated = [list(analysis.segments) for analysis in analyses]
+    for (a_idx, s_idx, seg), significant in zip(flat, flags):
+        updated[a_idx][s_idx] = replace(
+            seg,
+            bh_significant=significant,
+            reversal_flag=effect_reversal_flag(
+                analyses[a_idx].pooled_point_estimate, seg.inference.point_estimate, significant
+            ),
+        )
+    return tuple(
+        replace(analysis, segments=tuple(segments))
+        for analysis, segments in zip(analyses, updated)
     )

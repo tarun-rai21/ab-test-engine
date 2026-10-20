@@ -166,6 +166,8 @@ class SegmentAnalysisResultSchema(BaseModel):
     segments: tuple[SegmentResultSchema, ...]
     excluded_segments: tuple[str, ...]
     treatment_arm: str | None = None
+    heterogeneity_q: float | None = None
+    heterogeneity_p_value: float | None = None
 
 
 class ArmComparisonSchema(BaseModel):
