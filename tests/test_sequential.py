@@ -9,7 +9,9 @@ takes real wall-clock time and is a release gate, not a per-commit check
 (same reasoning as Phase 4's validation/ split).
 """
 
+import numpy as np
 import pytest
+from scipy.stats import norm
 
 from core.sequential import (
     alpha_spending_schedule,
@@ -21,24 +23,55 @@ from core.sequential import (
 # alpha_spending_schedule — closed-form checks
 # --------------------------------------------------------------------- #
 
-def test_schedule_final_checkpoint_equals_total_alpha_exactly():
+def test_schedule_matches_published_obrien_fleming_tables():
     """
-    At k=K, sqrt(K/k)=1, so z_K = z_(alpha/2) exactly, meaning alpha_K =
-    total_alpha exactly. This is a mathematically FORCED identity, not an
-    approximation — if this fails, alpha_spending_schedule has a real bug.
+    Calibrated O'Brien-Fleming constants for two-sided alpha=0.05 are
+    tabulated (Jennison & Turnbull): K=2 -> c=1.977, K=5 -> c=2.040,
+    K=10 -> c=2.087. The nominal per-look alphas are checked against values
+    computed from those published constants.
+
+    Review issue H2: the old schedule used c=1.96, and this test's
+    predecessor asserted schedule[-1] == 0.05 exactly — locking in a
+    boundary whose true type-I error was ~6.9%.
     """
-    schedule = alpha_spending_schedule(n_checkpoints=10, total_alpha=0.05)
-    assert schedule[-1] == pytest.approx(0.05, abs=1e-9)
+    k2 = alpha_spending_schedule(n_checkpoints=2, total_alpha=0.05)
+    assert k2[0] == pytest.approx(0.0052, abs=2e-4)
+    assert k2[1] == pytest.approx(0.0480, abs=3e-4)
+
+    k5 = alpha_spending_schedule(n_checkpoints=5, total_alpha=0.05)
+    assert k5[-1] == pytest.approx(2 * (1 - norm.cdf(2.040)), rel=0.01)
+
+    k10 = alpha_spending_schedule(n_checkpoints=10, total_alpha=0.05)
+    assert k10[-1] == pytest.approx(2 * (1 - norm.cdf(2.087)), rel=0.01)
+    assert k10[-1] < 0.05  # the price of having looked early
+
+
+def test_schedule_controls_overall_type_one_error_at_total_alpha():
+    """
+    Independent Monte Carlo check (does not reuse the integration routine):
+    simulate null z-statistic paths at 10 equally spaced looks and count how
+    often ANY look crosses its threshold. Must be ~5%, not the ~6.9% the old
+    c=1.96 boundary produced. 200k paths -> SE ~0.05pp.
+    """
+    K = 10
+    schedule = alpha_spending_schedule(n_checkpoints=K, total_alpha=0.05)
+    z_bounds = norm.ppf(1 - np.array(schedule) / 2)
+
+    rng = np.random.default_rng(0)
+    paths = np.cumsum(rng.standard_normal((200_000, K)), axis=1)
+    z = paths / np.sqrt(np.arange(1, K + 1))
+    crossed = (np.abs(z) >= z_bounds).any(axis=1).mean()
+
+    assert crossed == pytest.approx(0.05, abs=0.002)
 
 
 def test_schedule_first_checkpoint_is_vanishingly_small():
     """
-    At k=1, z_1 = z_(alpha/2)*sqrt(K) — for K=10, this is a large z-value,
-    giving alpha_1 on the order of 1e-9 or smaller. Hand-verified against
-    the printed schedule from the interactive run: 5.72e-10.
+    At k=1, z_1 = c*sqrt(K) — for K=10 (c=2.0865) that is ~6.6, giving
+    alpha_1 on the order of 1e-11.
     """
     schedule = alpha_spending_schedule(n_checkpoints=10, total_alpha=0.05)
-    assert schedule[0] == pytest.approx(5.72e-10, rel=0.05)
+    assert schedule[0] == pytest.approx(2 * (1 - norm.cdf(2.0865 * np.sqrt(10))), rel=0.05)
     assert schedule[0] < 1e-6  # generously loose bound: must be MUCH smaller than naive 0.05
 
 
@@ -161,7 +194,7 @@ def test_simulate_peeking_fpr_checkpoint_ns_not_strictly_increasing_raises():
 def test_sequential_check_detects_disagreement():
     """
     Reproduces the exact hand-verified scenario: checkpoint 4 of 10,
-    naive p=0.03 says significant, corrected threshold (~0.00194) says no.
+    naive p=0.03 says significant, corrected threshold (~0.00097) says no.
     """
     checkpoints = [
         {"cumulative_n": 200, "p_value_at_check": 0.40},
@@ -185,8 +218,8 @@ def test_sequential_check_detects_disagreement():
 
 def test_sequential_check_no_disagreement_when_genuinely_significant():
     """
-    At the FINAL checkpoint (position 10), the corrected threshold equals
-    the naive 0.05 exactly (schedule's last value) -> a p-value clearly
+    At the FINAL checkpoint (position 10), the corrected threshold is ~0.0369
+    (below the naive 0.05 after calibration) -> a p-value clearly
     below both should show naive and corrected agreeing, no disagreement.
     """
     checkpoints = [{"cumulative_n": 2000, "p_value_at_check": 0.001}]
