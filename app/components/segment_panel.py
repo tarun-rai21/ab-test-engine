@@ -52,7 +52,7 @@ def render_segment_panel(segments: tuple[SegmentAnalysisResult, ...] | None) -> 
                 "Significant (BH-corrected)": "✅ Yes" if s.bh_significant else "—",
                 "Significant reversal?": "⚠️ Yes" if s.reversal_flag else "No",
             })
-        st.dataframe(pd.DataFrame(rows), hide_index=True, use_container_width=True)
+        st.dataframe(pd.DataFrame(rows), hide_index=True, width="stretch")
 
         if analysis.excluded_segments:
             st.caption(

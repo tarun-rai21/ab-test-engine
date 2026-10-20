@@ -42,3 +42,33 @@ def test_init_schema_is_idempotent():
     engine = get_engine()
     init_schema(engine)
     init_schema(engine)  # should not raise
+
+
+def test_get_engine_rebuilds_when_database_url_changes(monkeypatch, tmp_path):
+    """
+    Review issue L2: get_engine() used to return the cached engine even
+    after DATABASE_URL changed, so seed_database(database_url=...) silently
+    wrote to whichever DB the first engine pointed at.
+    """
+    memory_engine = get_engine()
+    assert get_engine() is memory_engine  # unchanged URL -> same singleton
+
+    file_url = f"sqlite:///{(tmp_path / 'other.db').as_posix()}"
+    monkeypatch.setenv("DATABASE_URL", file_url)
+    file_engine = get_engine()
+    assert file_engine is not memory_engine
+    assert file_engine.url.render_as_string(hide_password=False) == file_url
+    file_engine.dispose()
+
+
+def test_create_memory_engine_returns_isolated_databases():
+    from db.connection import create_memory_engine
+
+    a, b = create_memory_engine(), create_memory_engine()
+    with a.begin() as conn:
+        conn.execute(text(
+            "INSERT INTO experiments (experiment_id, name, start_date) "
+            "VALUES ('e1', 'x', '2025-01-01')"
+        ))
+    with b.connect() as conn:
+        assert conn.execute(text("SELECT COUNT(*) FROM experiments")).scalar() == 0

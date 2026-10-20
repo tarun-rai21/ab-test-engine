@@ -7,9 +7,11 @@
 CREATE TABLE IF NOT EXISTS users (
     user_id               TEXT PRIMARY KEY,
     signup_date           DATE NOT NULL,
-    device_type           TEXT NOT NULL,              -- 'mobile' | 'desktop'
-    region                TEXT NOT NULL,
-    existing_customer     BOOLEAN NOT NULL,
+    -- Segment attributes are nullable: uploaded datasets may not have them,
+    -- and segment analysis already drops NULL segment values.
+    device_type           TEXT,                       -- 'mobile' | 'desktop'
+    region                TEXT,
+    existing_customer     BOOLEAN,
     pre_period_covariate  REAL                          -- e.g. 30-day pre-period spend/activity
 );
 

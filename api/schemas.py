@@ -25,7 +25,7 @@ from pydantic import BaseModel, ConfigDict, Field
 # ===================================================================== #
 
 class VariantCreateRequest(BaseModel):
-    name: str
+    name: str = Field(min_length=1)
     split_pct: float = Field(ge=0.0, le=1.0)
 
 
@@ -58,9 +58,11 @@ class AssignRequest(BaseModel):
     n_users: int = Field(gt=0)
     baseline_rate: float = Field(gt=0.0, lt=1.0)
     true_effect: float = 0.0
-    covariate_correlation: float = 0.5
-    seed: int = 42
-    corrupted_split: float | None = None
+    # Bounds mirror ExperimentSimulator's own validation, so bad input is a
+    # 422 at the edge rather than a 500 from deep inside the simulator.
+    covariate_correlation: float = Field(default=0.5, gt=-0.99, lt=0.99)
+    seed: int = Field(default=42, ge=0)
+    corrupted_split: float | None = Field(default=None, gt=0.0, lt=1.0)
     segment_heterogeneity: dict[str, dict[str, float]] | None = None
 
 

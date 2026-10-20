@@ -31,7 +31,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import pandas as pd
 import yaml
-from sqlalchemy import text
+from sqlalchemy import Engine, text
 
 from data_sim.ground_truth import GroundTruth
 from data_sim.simulator import ExperimentSimulator
@@ -116,7 +116,14 @@ def _delete_existing_experiment(engine, experiment_id: str) -> None:
             )
 
 
-def seed_database(config: dict, database_url: str | None = None) -> None:
+def seed_database(
+    config: dict, database_url: str | None = None, engine: Engine | None = None
+) -> None:
+    """
+    engine: optional explicit target (e.g. a per-session in-memory DB from
+    db.connection.create_memory_engine()). When omitted, the process-wide
+    get_engine() is used, honouring database_url if given.
+    """
     if database_url:
         os.environ["DATABASE_URL"] = database_url
 
@@ -133,7 +140,7 @@ def seed_database(config: dict, database_url: str | None = None) -> None:
 
     users_df, assignments_df, events_df, ground_truth = sim.generate()
 
-    engine = get_engine()
+    engine = engine or get_engine()
     init_schema(engine)
 
     _delete_existing_experiment(engine, sim.experiment_id)
@@ -188,9 +195,6 @@ def seed_database(config: dict, database_url: str | None = None) -> None:
     print(ground_truth.summary())
 
 
-if __name__ == "__main__":
-    cfg = load_config()
-    seed_database(cfg)
 
 def seed_assignments_for_existing_experiment(
     experiment_id: str,
@@ -267,3 +271,8 @@ def seed_assignments_for_existing_experiment(
         events_df.to_sql("events", conn, if_exists="append", index=False)
 
     return ground_truth
+
+
+if __name__ == "__main__":
+    cfg = load_config()
+    seed_database(cfg)

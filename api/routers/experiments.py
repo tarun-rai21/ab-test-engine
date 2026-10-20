@@ -60,6 +60,13 @@ def create_experiment(request: ExperimentCreateRequest) -> ExperimentCreateRespo
             detail=f"variant split_pct values must sum to 1.0, got {total_split}",
         )
 
+    names = [v.name for v in request.variants]
+    if len(set(names)) != len(names):
+        raise HTTPException(
+            status_code=422,
+            detail=f"variant names must be unique, got {names}",
+        )
+
     experiment_id = _generate_experiment_id()
     engine = get_engine()
 
@@ -161,7 +168,14 @@ def assign(experiment_id: str, request: AssignRequest) -> AssignResponse:
         "corrupted_split": request.corrupted_split,
         "segment_heterogeneity": request.segment_heterogeneity,
     }
-    seed_assignments_for_existing_experiment(experiment_id, sim_cfg)
+    try:
+        seed_assignments_for_existing_experiment(experiment_id, sim_cfg)
+    except (ValueError, RuntimeError) as exc:
+        # The simulator rejects infeasible configurations (e.g. a covariate
+        # correlation its skewed covariate cannot reach, or more than one
+        # heterogeneous segment column) — the caller's input, not a server
+        # fault, so 422 rather than 500 (review issue L1).
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
 
     observed_counts, expected_ratios = get_variant_counts(engine, experiment_id)
     srm_result = srm_check(observed_counts, expected_ratios)
