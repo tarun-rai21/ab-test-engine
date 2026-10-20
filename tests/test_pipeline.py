@@ -302,8 +302,8 @@ def test_sequential_check_against_real_persisted_checkpoints(isolated_db):
 
     assert report.sequential_risk is not None, (
         "sequential_risk was None — get_sequential_checkpoints() likely "
-        "isn't reading the real table, or the >1-row gate in analyze_experiment "
-        "is misfiring."
+        "isn't reading the real table, or the checkpoint gate in "
+        "analyze_experiment is misfiring."
     )
     assert report.sequential_risk.checkpoint_position == 4
     assert report.sequential_risk.naive_significant is True
@@ -311,11 +311,12 @@ def test_sequential_check_against_real_persisted_checkpoints(isolated_db):
     assert report.sequential_risk.disagreement is True
 
 
-def test_sequential_check_skipped_with_zero_or_one_checkpoint(isolated_db):
+def test_sequential_check_skipped_with_zero_checkpoints_but_runs_on_first(isolated_db):
     """
-    Zero checkpoints (the normal, common state) and exactly one checkpoint
-    (no repeated-look risk to flag yet) must both leave sequential_risk=None
-    — the >1-row gate documented in core/pipeline.py's design decision 4.
+    Zero checkpoints (the normal, common state) leaves sequential_risk=None.
+    A single checkpoint IS evaluated (review issue D3): the first look is
+    the most noise-prone one, so p=0.03 at position 1 of 10 must be flagged
+    as a naive/corrected disagreement rather than skipped.
     """
     engine = isolated_db
     config = {"simulator": {
@@ -333,7 +334,9 @@ def test_sequential_check_skipped_with_zero_or_one_checkpoint(isolated_db):
     report_one = analyze_experiment(
         engine, "exp_seed99", n_checkpoints_planned=10, checkpoint_n=200
     )
-    assert report_one.sequential_risk is None
+    assert report_one.sequential_risk is not None
+    assert report_one.sequential_risk.checkpoint_position == 1
+    assert report_one.sequential_risk.disagreement is True
 
 
 def test_sequential_check_skipped_without_planned_params(isolated_db):

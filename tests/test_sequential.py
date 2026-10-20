@@ -15,6 +15,7 @@ from scipy.stats import norm
 
 from core.sequential import (
     alpha_spending_schedule,
+    checkpoint_position,
     sequential_check,
     simulate_peeking_fpr,
 )
@@ -249,3 +250,30 @@ def test_sequential_check_uses_latest_checkpoint_regardless_of_list_order():
 def test_sequential_check_empty_checkpoints_raises():
     with pytest.raises(ValueError):
         sequential_check([], n_checkpoints_planned=10, checkpoint_n=200)
+
+
+def test_sequential_check_flags_look_beyond_planned_schedule():
+    """
+    Review issue M1: a look past the planned final sample size used to be
+    silently clamped to the final position. It still uses the final
+    threshold (clamped) but must now report beyond_plan=True.
+    """
+    checkpoints = [{"cumulative_n": 4000, "p_value_at_check": 0.02}]
+    result = sequential_check(checkpoints, n_checkpoints_planned=10, checkpoint_n=200)
+    assert result.checkpoint_position == 10
+    assert result.beyond_plan is True
+
+    on_plan = sequential_check(
+        [{"cumulative_n": 2000, "p_value_at_check": 0.02}],
+        n_checkpoints_planned=10, checkpoint_n=200,
+    )
+    assert on_plan.beyond_plan is False
+
+
+def test_checkpoint_position_maps_total_n_onto_schedule():
+    assert checkpoint_position(400, 10, 400) == (1, False)
+    assert checkpoint_position(1600, 10, 400) == (4, False)
+    assert checkpoint_position(50, 10, 400) == (1, False)   # below first look: clamp up
+    assert checkpoint_position(8000, 10, 400) == (10, True)
+    with pytest.raises(ValueError):
+        checkpoint_position(400, 10, 0)

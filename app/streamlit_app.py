@@ -79,7 +79,8 @@ with col3:
         "Planned checkpoints", min_value=1, value=10, disabled=not enable_sequential
     )
     checkpoint_n = st.number_input(
-        "Users per checkpoint", min_value=1, value=200, disabled=not enable_sequential
+        "Total users (both arms) per planned checkpoint",
+        min_value=1, value=400, disabled=not enable_sequential,
     )
 
 if st.button("▶️ Run analysis", type="primary"):
@@ -123,6 +124,8 @@ render_sequential_panel(
     report.sequential_risk,
     control_converted=control_df["converted"].to_numpy(dtype=float),
     treatment_converted=treatment_df["converted"].to_numpy(dtype=float),
+    n_checkpoints_planned=int(n_checkpoints_planned) if enable_sequential else None,
+    checkpoint_n=int(checkpoint_n) if enable_sequential else None,
 )
 st.divider()
 

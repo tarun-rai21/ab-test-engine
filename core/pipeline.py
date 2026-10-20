@@ -38,8 +38,11 @@ DESIGN DECISIONS, made explicit here rather than left implicit in code:
 4. Sequential-peeking check is genuinely optional. The schema has no column
    anywhere that stores an experiment's PLANNED checkpoint schedule
    (n_checkpoints_planned, checkpoint_n) — so these are accepted as
-   optional caller-supplied parameters. If omitted, or if fewer than 2
-   checkpoint rows exist yet, sequential_risk is simply None in the report.
+   optional caller-supplied parameters. If omitted, or if no checkpoint
+   rows exist yet, sequential_risk is simply None in the report. A single
+   checkpoint IS evaluated: the first look is the most noise-prone one, so
+   skipping it would hide exactly the risk this check exists for.
+   checkpoint_n and the stored cumulative_n are TOTAL users across arms.
    This is a real, honest schema gap surfaced here, not papered over.
 
 5. Segment analysis (Phase 6) is optional, driven by an explicit
@@ -192,7 +195,7 @@ def analyze_experiment(
     sequential_risk: SequentialCheckResult | None = None
     if n_checkpoints_planned is not None and checkpoint_n is not None:
         checkpoints = get_sequential_checkpoints(engine, experiment_id)
-        if len(checkpoints) > 1:
+        if checkpoints:
             sequential_risk = sequential_check(
                 checkpoints, n_checkpoints_planned, checkpoint_n
             )

@@ -37,6 +37,7 @@ class SequentialCheckResult:
     corrected_threshold: float
     corrected_significant: bool
     disagreement: bool             # True = naive says yes, corrected says no (the dangerous case)
+    beyond_plan: bool = False      # True = latest look is past the planned final sample size
 
 
 def _obf_crossing_probability(c: float, n_checkpoints: int, grid_step: float = 0.005) -> float:
@@ -128,6 +129,12 @@ def simulate_peeking_fpr(
     thresholds from alpha_spending_schedule(), typically stricter early,
     relaxing toward (but, once calibrated, staying below) naive_alpha at
     the final checkpoint.
+
+    UNITS: checkpoint_n and checkpoint_ns count users PER ARM (each arm is
+    sliced to that length). This differs from sequential_check() and the
+    sequential_checkpoints table, whose cumulative_n is the TOTAL across
+    both arms — so checkpoint_n=200 here corresponds to checkpoint_n=400
+    there.
 
     Both cases share this ONE loop deliberately — two separate
     implementations (one naive, one corrected) risk silently diverging over
@@ -247,8 +254,11 @@ def sequential_check(
 
     n_checkpoints_planned / checkpoint_n: the SAME values used when the
     experiment's schedule was originally planned (e.g. 10 checkpoints of
-    200 users each) — needed to know which position in the alpha-spending
+    400 users each) — needed to know which position in the alpha-spending
     schedule this checkpoint corresponds to.
+
+    UNITS: cumulative_n and checkpoint_n are TOTAL users across both arms
+    (matching the sequential_checkpoints table). See checkpoint_position().
     """
     if not checkpoints:
         raise ValueError("checkpoints list must contain at least one entry.")
@@ -257,16 +267,13 @@ def sequential_check(
     latest_n = latest["cumulative_n"]
     p_value = latest["p_value_at_check"]
 
-    # Position in the schedule: cumulative_n=200 with checkpoint_n=200 -> position 1;
-    # cumulative_n=800 -> position 4. Clamp to the planned range so a
-    # checkpoint slightly off-grid doesn't index out of bounds.
-    position = max(1, min(n_checkpoints_planned, round(latest_n / checkpoint_n)))
+    position, beyond_plan = checkpoint_position(latest_n, n_checkpoints_planned, checkpoint_n)
 
     schedule = alpha_spending_schedule(n_checkpoints_planned, total_alpha)
     corrected_threshold = schedule[position - 1]
 
-    naive_significant = p_value < naive_alpha
-    corrected_significant = p_value < corrected_threshold
+    naive_significant = bool(p_value < naive_alpha)
+    corrected_significant = bool(p_value < corrected_threshold)
 
     return SequentialCheckResult(
         latest_checkpoint_n=latest_n,
@@ -276,4 +283,30 @@ def sequential_check(
         corrected_threshold=corrected_threshold,
         corrected_significant=corrected_significant,
         disagreement=(naive_significant and not corrected_significant),
+        beyond_plan=beyond_plan,
     )
+
+
+def checkpoint_position(
+    cumulative_n: int, n_checkpoints_planned: int, checkpoint_n: int
+) -> tuple[int, bool]:
+    """
+    Maps a checkpoint's cumulative sample size onto its 1-based position in
+    the planned schedule: cumulative_n=400 with checkpoint_n=400 -> 1;
+    cumulative_n=1600 -> 4. Both arguments are TOTAL users across arms.
+
+    Returns (position, beyond_plan). The position is clamped to
+    [1, n_checkpoints_planned] so an off-grid checkpoint never indexes out
+    of bounds — but a look past the planned final sample size is reported
+    via beyond_plan=True instead of being silently clamped (review issue
+    M1): the schedule spends all of alpha by the planned final look, so a
+    look beyond it is outside what the correction was designed for.
+    """
+    if n_checkpoints_planned < 1 or checkpoint_n < 1:
+        raise ValueError(
+            f"n_checkpoints_planned and checkpoint_n must be >= 1, got "
+            f"{n_checkpoints_planned} and {checkpoint_n}"
+        )
+    raw_position = round(cumulative_n / checkpoint_n)
+    position = max(1, min(n_checkpoints_planned, raw_position))
+    return position, raw_position > n_checkpoints_planned

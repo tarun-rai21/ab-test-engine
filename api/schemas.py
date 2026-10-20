@@ -84,8 +84,10 @@ class AnalyzeRequest(BaseModel):
     metric: str = "conversion"
     use_cuped: bool = True
     segment_columns: list[str] | None = None
-    n_checkpoints_planned: int | None = None
-    checkpoint_n: int | None = None
+    n_checkpoints_planned: int | None = Field(default=None, ge=1)
+    # TOTAL users across both arms per planned look (same unit as the
+    # sequential_checkpoints table's cumulative_n).
+    checkpoint_n: int | None = Field(default=None, ge=1)
 
 
 class SRMResultSchema(BaseModel):
@@ -114,9 +116,12 @@ class InferenceResultSchema(BaseModel):
 class SequentialCheckResultSchema(BaseModel):
     model_config = ConfigDict(from_attributes=True)
     checkpoint_position: int
+    naive_p_value: float
     naive_significant: bool
+    corrected_threshold: float
     corrected_significant: bool
     disagreement: bool
+    beyond_plan: bool
     latest_checkpoint_n: int
 
 
