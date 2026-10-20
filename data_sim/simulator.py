@@ -108,6 +108,9 @@ class ExperimentSimulator:
         corrupted_split: float | None = None,
         segment_heterogeneity: dict[str, dict[str, float]] | None = None,
         experiment_id: str | None = None,
+        revenue_mean: float | None = None,
+        revenue_lift: float = 0.0,
+        revenue_sigma: float = 1.0,
     ):
         if not (0.0 < baseline_rate < 1.0):
             raise ValueError(f"baseline_rate must be in (0,1), got {baseline_rate}")
@@ -115,6 +118,12 @@ class ExperimentSimulator:
             raise ValueError(
                 f"covariate_correlation must be in (-0.99, 0.99), got {covariate_correlation}"
             )
+        if revenue_mean is not None and revenue_mean <= 0:
+            raise ValueError(f"revenue_mean must be positive, got {revenue_mean}")
+        if revenue_lift <= -1.0:
+            raise ValueError(f"revenue_lift must be > -1, got {revenue_lift}")
+        if revenue_sigma <= 0:
+            raise ValueError(f"revenue_sigma must be positive, got {revenue_sigma}")
         if segment_heterogeneity and len(segment_heterogeneity) > 1:
             raise ValueError(
                 "Only one segment column may carry configured heterogeneity per generate() call."
@@ -129,6 +138,9 @@ class ExperimentSimulator:
         self.segment_heterogeneity = segment_heterogeneity
         self.experiment_id = experiment_id or f"exp_seed{seed}"
         self.segment_column = next(iter(segment_heterogeneity)) if segment_heterogeneity else None
+        self.revenue_mean = revenue_mean
+        self.revenue_lift = revenue_lift
+        self.revenue_sigma = revenue_sigma
 
     # ------------------------------------------------------------------ #
 
@@ -164,7 +176,8 @@ class ExperimentSimulator:
         realized_baseline_rate = float(p_baseline.mean())
 
         assignments_df = self._build_assignments(users_df["user_id"], variant)
-        events_df = self._build_events(users_df["user_id"], converted)
+        order_values = self._order_values(rng, converted, is_treatment)
+        events_df = self._build_events(users_df["user_id"], converted, order_values)
 
         ground_truth = GroundTruth(
             n_users=self.n_users,
@@ -183,6 +196,8 @@ class ExperimentSimulator:
             covariate_correlation_realized=realized_corr,
             true_effect_realized=realized_effect,
             segment_effects_realized=segment_effects_realized,
+            revenue_mean=self.revenue_mean,
+            revenue_lift=self.revenue_lift,
         )
 
         return users_df, assignments_df, events_df, ground_truth
@@ -396,7 +411,29 @@ class ExperimentSimulator:
             "assigned_at": datetime(2025, 1, 1),
         })
 
-    def _build_events(self, user_ids: pd.Series, converted: np.ndarray) -> pd.DataFrame:
+    def _order_values(
+        self, rng: np.random.Generator, converted: np.ndarray, is_treatment: np.ndarray
+    ) -> np.ndarray:
+        """
+        Order value for each user (only meaningful where converted == 1).
+
+        revenue_mean=None -> every conversion has value 1.0 (the original
+        behaviour; no extra random draws, so existing seeds reproduce the
+        exact same data). Otherwise values are LOG-NORMAL — right-skewed
+        and heavy-tailed like real order values — with mean revenue_mean in
+        control and revenue_mean * (1 + revenue_lift) in treatment:
+        mu = ln(mean) - sigma^2 / 2 gives E[value] = mean exactly.
+        """
+        if self.revenue_mean is None:
+            return np.ones(self.n_users)
+        treatment_mean = self.revenue_mean * (1 + self.revenue_lift)
+        means = np.where(is_treatment, treatment_mean, self.revenue_mean)
+        mu = np.log(means) - self.revenue_sigma**2 / 2
+        return rng.lognormal(mean=mu, sigma=self.revenue_sigma)
+
+    def _build_events(
+        self, user_ids: pd.Series, converted: np.ndarray, order_values: np.ndarray
+    ) -> pd.DataFrame:
         converted_mask = converted.astype(bool)
         converted_ids = user_ids[converted_mask].to_numpy()
         return pd.DataFrame({
@@ -405,5 +442,5 @@ class ExperimentSimulator:
             "experiment_id": self.experiment_id,
             "event_type": "conversion",
             "event_timestamp": datetime(2025, 1, 2),
-            "value": 1.0,
+            "value": order_values[converted_mask],
         })

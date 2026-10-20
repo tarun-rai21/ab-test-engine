@@ -69,3 +69,31 @@ def test_upload_intended_split_drives_srm_check():
 
     ingest_upload(engine, df, "exp_5050", treatment_split=0.50)
     assert analyze_experiment(engine, "exp_5050", persist=False).srm.flagged is True
+
+
+def test_upload_revenue_column_feeds_revenue_metrics():
+    df = _valid_df()
+    is_treatment = df["variant_id"] == "x_treatment"
+    order_value = [30.0 + 10 * (i % 3) for i in range(len(df))] + 20.0 * is_treatment
+    df["revenue"] = df["converted"] * order_value
+    assert validate_upload(df) == []
+
+    engine = create_memory_engine()
+    ingest_upload(engine, df, "exp_rev")
+    report = analyze_experiment(
+        engine, "exp_rev", metric_name="revenue_per_conversion", persist=False
+    )
+    converters = df[df["converted"] == 1]
+    expected = (
+        converters.loc[converters["variant_id"] == "x_treatment", "revenue"].mean()
+        - converters.loc[converters["variant_id"] == "x_control", "revenue"].mean()
+    )
+    assert report.raw_effect.point_estimate == pytest.approx(expected)
+
+
+def test_validate_upload_rejects_bad_revenue():
+    df = _valid_df()
+    df["revenue"] = 10.0  # revenue on non-converting rows
+    assert any("converted = 1" in e for e in validate_upload(df))
+    df["revenue"] = -1.0
+    assert any("non-negative" in e for e in validate_upload(df))

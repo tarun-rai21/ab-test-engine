@@ -85,6 +85,12 @@ def validate_upload(df: pd.DataFrame) -> list[str]:
         errors.append("Every 'converted' value must be 0 or 1 (no blanks).")
     if "user_id" in df.columns and df["user_id"].duplicated().any():
         errors.append("user_id values must be unique — this format is one row per user.")
+    if "revenue" in df.columns:
+        revenue = pd.to_numeric(df["revenue"], errors="coerce")
+        if revenue.isna().any() or (revenue < 0).any():
+            errors.append("revenue must be numeric, non-negative, with no blanks.")
+        elif ((revenue > 0) & (pd.to_numeric(df["converted"], errors="coerce") != 1)).any():
+            errors.append("Rows with revenue > 0 must have converted = 1.")
     if "pre_period_covariate" in df.columns and pd.to_numeric(
         df["pre_period_covariate"], errors="coerce"
     ).isna().any():
@@ -134,6 +140,12 @@ def ingest_upload(
         for v in df["variant_id"]
     ]
     df["converted"] = pd.to_numeric(df["converted"]).astype(int)
+    # Per-user revenue becomes the value of that user's conversion event;
+    # without a revenue column every conversion is worth 1.0 (as before).
+    df["revenue"] = (
+        pd.to_numeric(df["revenue"]) if "revenue" in df.columns
+        else df["converted"].astype(float)
+    )
 
     users = pd.DataFrame({
         "user_id": df["user_id"],
@@ -151,14 +163,15 @@ def ingest_upload(
         "variant_id": df["variant_id"],
         "assigned_at": "2025-01-01",
     })
-    converted_ids = df.loc[df["converted"] == 1, "user_id"].reset_index(drop=True)
+    converters = df.loc[df["converted"] == 1].reset_index(drop=True)
+    converted_ids = converters["user_id"]
     events = pd.DataFrame({
         "event_id": [f"ev_{experiment_id}_{i:07d}" for i in range(len(converted_ids))],
         "user_id": converted_ids,
         "experiment_id": experiment_id,
         "event_type": "conversion",
         "event_timestamp": "2025-01-02",
-        "value": 1.0,
+        "value": converters["revenue"].astype(float),
     })
 
     with engine.begin() as conn:
@@ -216,6 +229,18 @@ def render_generate_data_form() -> str | None:
             min_value=0.30, max_value=0.70, value=0.45, step=0.01,
         ) if simulate_srm_bug else None
 
+        col3, col4 = st.columns(2)
+        with col3:
+            revenue_mean = st.number_input(
+                "Average order value (0 = conversions only, no revenue)",
+                min_value=0.0, value=50.0, step=5.0,
+            )
+        with col4:
+            revenue_lift = st.slider(
+                "Treatment lift in order value", min_value=-0.5, max_value=0.5,
+                value=0.0, step=0.01,
+            )
+
         submitted = st.form_submit_button("Generate data")
 
     if not submitted:
@@ -228,6 +253,8 @@ def render_generate_data_form() -> str | None:
         "covariate_correlation": float(covariate_correlation),
         "seed": int(seed),
         "corrupted_split": corrupted_split,
+        "revenue_mean": float(revenue_mean) if revenue_mean > 0 else None,
+        "revenue_lift": float(revenue_lift),
     }}
 
     # seed_database() derives its OWN experiment_id from the seed
@@ -253,7 +280,8 @@ def render_upload_form() -> str | None:
     st.caption(
         f"CSV must have one row per user, with columns: "
         f"{', '.join(REQUIRED_CSV_COLUMNS)} (required), plus optionally "
-        f"user_id, pre_period_covariate (needed for CUPED) and/or "
+        f"user_id, revenue (per-user, for revenue metrics), pre_period_covariate "
+        f"(needed for CUPED) and/or "
         f"{', '.join(OPTIONAL_SEGMENT_COLUMNS)} (for segment analysis). "
         f"variant_id values must end in '_control' or '_treatment'."
     )

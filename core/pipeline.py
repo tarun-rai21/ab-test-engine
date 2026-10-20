@@ -77,10 +77,17 @@ from core.data_access import (
     split_by_variant,
 )
 from core.inference import InferenceResult, cuped_adjust, raw_ttest_ci, variance_reduction_pct
+from core.metrics import (
+    MEAN_METRICS,
+    estimate_effect,
+    metric_outcome,
+    validate_metric,
+    winsorization_cap,
+)
 from core.persistence import persist_inference_result, persist_srm_result
 from core.segments import SegmentAnalysisResult, segment_breakdown
 from core.sequential import SequentialCheckResult, sequential_check
-from core.validity import SRMResult, mde_curve, srm_check
+from core.validity import SRMResult, achievable_mde_from_se, mde_curve, srm_check
 
 
 @dataclass(frozen=True)
@@ -94,6 +101,7 @@ class AnalysisReport:
     cuped_variance_reduction_pct: float | None
     sequential_risk: SequentialCheckResult | None
     segments: tuple[SegmentAnalysisResult, ...] | None  # None if segment_columns not requested
+    winsorization_cap: float | None = None  # revenue_per_user cap applied, if any
 
 
 def analyze_experiment(
@@ -106,6 +114,7 @@ def analyze_experiment(
     segment_columns: list[str] | None = None,
     persist: bool = True,
     spending: str = "lan_demets",
+    winsorize_quantile: float | None = None,
 ) -> AnalysisReport:
     """
     Runs the full spec Section 4.4 sequence for one experiment and returns a
@@ -146,14 +155,14 @@ def analyze_experiment(
     # Only fetch the segment columns actually requested — an empty list
     # when none are, per get_inference_data()'s own segment_columns
     # contract (Step 1).
+    validate_metric(metric_name)
     df = get_inference_data(
         engine, experiment_id, segment_columns=segment_columns or []
     )
     control_df, treatment_df = split_by_variant(df)
 
-    raw_control = control_df["converted"].to_numpy(dtype=float)
-    raw_treatment = treatment_df["converted"].to_numpy(dtype=float)
-    raw_effect = raw_ttest_ci(raw_control, raw_treatment)
+    cap = winsorization_cap(df, metric_name, winsorize_quantile)
+    raw_effect = estimate_effect(control_df, treatment_df, metric_name, cap)
 
     if persist:
         persist_srm_result(engine, experiment_id, srm_result)
@@ -161,20 +170,27 @@ def analyze_experiment(
 
     # --- Achievable MDE: context, not a gate. A failure here (e.g. observed
     # baseline_rate is exactly 0 or 1) should not take down the whole report.
+    # Conversion uses the exact two-proportion inversion; continuous and
+    # ratio metrics use the realized standard error.
     achievable_mde: float | None
     try:
-        baseline_rate_observed = float(control_df["converted"].mean())
-        n_per_variant = min(len(control_df), len(treatment_df))
-        achievable_mde = mde_curve(baseline_rate_observed, [n_per_variant])[0]
+        if metric_name == "conversion":
+            baseline_rate_observed = float(control_df["converted"].mean())
+            n_per_variant = min(len(control_df), len(treatment_df))
+            achievable_mde = mde_curve(baseline_rate_observed, [n_per_variant])[0]
+        else:
+            achievable_mde = achievable_mde_from_se(raw_effect.standard_error)
     except ValueError:
         achievable_mde = None
 
     # --- CUPED: optional, and itself fault-tolerant for the same reason.
     cuped_effect: InferenceResult | None = None
     cuped_vr: float | None = None
-    if use_cuped:
+    # Ratio metrics have no per-user additive outcome to adjust, so CUPED
+    # applies to mean metrics only.
+    if use_cuped and metric_name in MEAN_METRICS:
         try:
-            y = df["converted"].to_numpy(dtype=float)
+            y = metric_outcome(df, metric_name, cap)
             x = df["pre_period_covariate"].to_numpy(dtype=float)
             adj = cuped_adjust(y, x)  # theta estimated on the POOLED sample — see decision 3
 
@@ -222,7 +238,8 @@ def analyze_experiment(
         for column in segment_columns:
             try:
                 analysis = segment_breakdown(
-                    df, column, pooled_point_estimate=raw_effect.point_estimate
+                    df, column, pooled_point_estimate=raw_effect.point_estimate,
+                    estimator=lambda c, t: estimate_effect(c, t, metric_name, cap),
                 )
             except ValueError:
                 # This ONE column's segment analysis failed (e.g. every
@@ -251,4 +268,5 @@ def analyze_experiment(
         cuped_variance_reduction_pct=cuped_vr,
         sequential_risk=sequential_risk,
         segments=segments,
+        winsorization_cap=cap,
     )

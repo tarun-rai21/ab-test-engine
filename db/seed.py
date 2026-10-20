@@ -136,6 +136,9 @@ def seed_database(
         seed=sim_cfg["seed"],
         corrupted_split=sim_cfg.get("corrupted_split"),
         segment_heterogeneity=sim_cfg.get("segment_heterogeneity"),
+        revenue_mean=sim_cfg.get("revenue_mean"),
+        revenue_lift=sim_cfg.get("revenue_lift", 0.0),
+        revenue_sigma=sim_cfg.get("revenue_sigma", 1.0),
     )
 
     users_df, assignments_df, events_df, ground_truth = sim.generate()
@@ -237,6 +240,9 @@ def seed_assignments_for_existing_experiment(
         corrupted_split=sim_cfg.get("corrupted_split"),
         segment_heterogeneity=sim_cfg.get("segment_heterogeneity"),
         experiment_id=experiment_id,
+        revenue_mean=sim_cfg.get("revenue_mean"),
+        revenue_lift=sim_cfg.get("revenue_lift", 0.0),
+        revenue_sigma=sim_cfg.get("revenue_sigma", 1.0),
     )
     users_df, assignments_df, events_df, ground_truth = sim.generate()
 

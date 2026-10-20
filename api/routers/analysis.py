@@ -61,6 +61,7 @@ def analyze(experiment_id: str, request: AnalyzeRequest) -> AnalysisReportSchema
             n_checkpoints_planned=request.n_checkpoints_planned,
             checkpoint_n=request.checkpoint_n,
             spending=request.spending,
+            winsorize_quantile=request.winsorize_quantile,
             segment_columns=request.segment_columns,
             persist=True,
         )

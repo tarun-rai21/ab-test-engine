@@ -30,6 +30,11 @@ class GroundTruth:
 
     composition: str = "additive"
 
+    # Order-value configuration (None = every conversion worth 1.0). True
+    # revenue-per-conversion effect = revenue_mean * revenue_lift.
+    revenue_mean: float | None = None
+    revenue_lift: float = 0.0
+
     def summary(self) -> str:
         lines = [
             f"n_users={self.n_users}, baseline_rate: configured={self.baseline_rate:.4f} "

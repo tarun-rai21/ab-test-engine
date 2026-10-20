@@ -74,7 +74,10 @@ def get_inference_data(
 ) -> pd.DataFrame:
     """
     Returns one row per user: user_id, variant_id, pre_period_covariate,
-    converted, plus whichever segment columns were requested.
+    converted (0/1), n_conversions (count of conversion events) and revenue
+    (sum of their values, 0 for non-converters), plus whichever segment
+    columns were requested. converted feeds the conversion metric; revenue
+    and n_conversions feed the revenue metrics (core.metrics).
 
     segment_columns controls which optional segment dimensions (from
     ALLOWED_SEGMENT_COLUMNS) are included:
@@ -141,7 +144,9 @@ def get_inference_data(
     query = text(
         f"""
         SELECT u.user_id, a.variant_id, u.pre_period_covariate{segment_select},
-               CASE WHEN COUNT(e.event_id) > 0 THEN 1 ELSE 0 END AS converted
+               CASE WHEN COUNT(e.event_id) > 0 THEN 1 ELSE 0 END AS converted,
+               COUNT(e.event_id) AS n_conversions,
+               COALESCE(SUM(e.value), 0.0) AS revenue
         FROM assignments a
         JOIN users u ON a.user_id = u.user_id
         LEFT JOIN events e

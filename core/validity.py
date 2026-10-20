@@ -197,3 +197,21 @@ def mde_curve(
         mdes.append(mde)
 
     return mdes
+
+
+def achievable_mde_from_se(
+    standard_error: float, alpha: float = 0.05, power: float = 0.80
+) -> float:
+    """
+    Smallest true difference detectable with the given power, for an
+    estimate with this standard error: (z_(alpha/2) + z_beta) * SE.
+
+    The metric-agnostic counterpart of mde_curve(), which is specific to a
+    two-proportion test — used for continuous and ratio metrics, where the
+    realized standard error already captures the outcome's variance.
+    """
+    if standard_error <= 0 or np.isnan(standard_error):
+        raise ValueError(f"standard_error must be positive, got {standard_error}")
+    if not (0.0 < alpha < 1.0) or not (0.0 < power < 1.0):
+        raise ValueError(f"alpha and power must be in (0,1), got {alpha}, {power}")
+    return float((norm.ppf(1 - alpha / 2) + norm.ppf(power)) * standard_error)

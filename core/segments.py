@@ -19,6 +19,7 @@ core/inference.py, core/validity.py, and core/sequential.py.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 
 import pandas as pd
@@ -115,6 +116,13 @@ def effect_reversal_flag(
     return bool((pooled_estimate > 0) != (segment_estimate > 0))
 
 
+def _conversion_welch(control_df: pd.DataFrame, treatment_df: pd.DataFrame) -> InferenceResult:
+    return raw_ttest_ci(
+        control_df["converted"].to_numpy(dtype=float),
+        treatment_df["converted"].to_numpy(dtype=float),
+    )
+
+
 @dataclass(frozen=True)
 class SegmentResult:
     segment_value: str
@@ -136,12 +144,17 @@ def segment_breakdown(
     segment_column: str,
     pooled_point_estimate: float,
     fdr: float = DEFAULT_FDR,
+    estimator: Callable[[pd.DataFrame, pd.DataFrame], InferenceResult] | None = None,
 ) -> SegmentAnalysisResult:
     """
     Computes a per-segment effect estimate for every distinct value of
     segment_column, applies Benjamini-Hochberg across all segment-level
     p-values tested, and flags any BH-significant segment whose sign
     disagrees with the pooled estimate (see effect_reversal_flag).
+
+    estimator: computes one segment's effect from its (control, treatment)
+    slices — e.g. core.metrics.estimate_effect bound to a metric. Defaults
+    to a Welch t-test on 'converted'.
 
     df must be shaped like core.data_access.get_inference_data()'s output —
     at minimum 'variant_id', 'converted', and segment_column present.
@@ -167,6 +180,8 @@ def segment_breakdown(
             f"{list(df.columns)}"
         )
 
+    if estimator is None:
+        estimator = _conversion_welch
     segment_values = sorted(df[segment_column].dropna().unique().tolist())
     if not segment_values:
         raise ValueError(f"No non-null values found in segment_column {segment_column!r}")
@@ -183,10 +198,7 @@ def segment_breakdown(
             continue
 
         try:
-            inference = raw_ttest_ci(
-                control_df["converted"].to_numpy(dtype=float),
-                treatment_df["converted"].to_numpy(dtype=float),
-            )
+            inference = estimator(control_df, treatment_df)
         except ValueError:
             excluded.append(str(value))
             continue

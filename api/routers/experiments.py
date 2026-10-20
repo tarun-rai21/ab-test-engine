@@ -190,6 +190,9 @@ def assign(experiment_id: str, request: AssignRequest) -> AssignResponse:
         "seed": request.seed,
         "corrupted_split": request.corrupted_split,
         "segment_heterogeneity": request.segment_heterogeneity,
+        "revenue_mean": request.revenue_mean,
+        "revenue_lift": request.revenue_lift,
+        "revenue_sigma": request.revenue_sigma,
     }
     try:
         seed_assignments_for_existing_experiment(experiment_id, sim_cfg)
