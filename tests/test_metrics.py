@@ -10,7 +10,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from core.inference import delta_method_ratio_ci, raw_ttest_ci
+from core.inference import cuped_ratio_ci, delta_method_ratio_ci, raw_ttest_ci
 from core.metrics import (
     METRICS,
     estimate_effect,
@@ -201,7 +201,7 @@ def test_pipeline_runs_every_metric(isolated_db):
     assert rpu.winsorization_cap is not None and rpu.cuped_effect is not None
     assert rpu.achievable_mde is not None and rpu.segments is not None
     assert aov.raw_effect.method == "delta_ratio"
-    assert aov.cuped_effect is None  # CUPED does not apply to ratio metrics
+    assert aov.cuped_effect.method == "cuped_delta_ratio"  # CUPED via linearization
     # configured order-value lift: 50 * 0.2 = +10 per conversion
     assert aov.raw_effect.ci_lower < 10.0 < aov.raw_effect.ci_upper
     assert aov.segments[0].segments[0].inference.method == "delta_ratio"
@@ -214,3 +214,61 @@ def test_pipeline_rejects_unknown_metric(isolated_db):
     }}, database_url="sqlite:///:memory:")
     with pytest.raises(ValueError):
         analyze_experiment(isolated_db, "exp_seed22", metric_name="clicks", persist=False)
+
+
+# --------------------------------------------------------------------- #
+# CUPED for the ratio metric
+# --------------------------------------------------------------------- #
+
+def _orders(rng, n, scale, covariate_effect):
+    """Users with Poisson order counts; order values scale with the
+    (log-normal) covariate the same way the simulator's tilt does."""
+    x = rng.lognormal(0.0, 0.75, n)
+    w = np.log(x) / 0.75
+    orders = rng.poisson(0.6, n)
+    revenue = np.array([
+        rng.exponential(scale * np.exp(covariate_effect * wi - covariate_effect**2 / 2), k).sum()
+        for wi, k in zip(w, orders)
+    ])
+    return revenue, orders.astype(float), x
+
+
+def test_cuped_ratio_with_zero_theta_equals_delta_method():
+    rng = np.random.default_rng(4)
+    y_c, n_c, x_c = _orders(rng, 2000, 40.0, 0.0)
+    y_t, n_t, x_t = _orders(rng, 2000, 44.0, 0.0)
+
+    cuped, _, _ = cuped_ratio_ci(y_c, n_c, x_c, y_t, n_t, x_t, theta=0.0)
+    delta = delta_method_ratio_ci(y_c, n_c, y_t, n_t)
+
+    assert cuped.point_estimate == pytest.approx(delta.point_estimate)
+    assert cuped.standard_error == pytest.approx(delta.standard_error, rel=1e-9)
+
+
+def test_cuped_ratio_reduces_variance_when_covariate_predicts_order_value():
+    rng = np.random.default_rng(5)
+    y_c, n_c, x_c = _orders(rng, 4000, 40.0, 0.8)
+    y_t, n_t, x_t = _orders(rng, 4000, 44.0, 0.8)
+
+    cuped, reduction, control_variance = cuped_ratio_ci(y_c, n_c, x_c, y_t, n_t, x_t)
+    delta = delta_method_ratio_ci(y_c, n_c, y_t, n_t)
+
+    assert cuped.method == "cuped_delta_ratio"
+    assert reduction > 10.0
+    assert cuped.standard_error < 0.95 * delta.standard_error
+    assert 0 < control_variance < cuped.standard_error**2
+    # Same expected effect: the adjustment only removes covariate imbalance.
+    assert abs(cuped.point_estimate - delta.point_estimate) < 2 * delta.standard_error
+
+
+def test_simulator_revenue_covariate_effect_ties_order_value_to_covariate():
+    base = dict(n_users=60_000, baseline_rate=0.2, true_effect=0.0,
+                covariate_correlation=0.0, seed=12, revenue_mean=50.0)
+    users, _, events, _ = ExperimentSimulator(**base, revenue_covariate_effect=0.5).generate()
+    merged = events.merge(users[["user_id", "pre_period_covariate"]], on="user_id")
+    assert np.corrcoef(merged["pre_period_covariate"], merged["value"])[0, 1] > 0.1
+    assert merged["value"].mean() == pytest.approx(50.0, rel=0.05)
+
+    _, a_default, e_default, _ = ExperimentSimulator(**base).generate()
+    _, a_zero, e_zero, _ = ExperimentSimulator(**base, revenue_covariate_effect=0.0).generate()
+    pd.testing.assert_frame_equal(e_default, e_zero)

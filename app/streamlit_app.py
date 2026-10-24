@@ -81,7 +81,10 @@ with col1:
     )
     use_cuped = st.checkbox(
         "Use CUPED variance reduction", value=True,
-        help="Applies to conversion and revenue_per_user (not to ratio metrics).",
+        help=(
+            "Uses the pre-period covariate to reduce variance. For the ratio metric "
+            "it is applied to the delta method's per-user linearization."
+        ),
     )
     winsorize = st.checkbox(
         "Winsorize revenue at the 99th percentile",

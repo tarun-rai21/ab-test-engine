@@ -277,6 +277,7 @@ cells = [
         "    'n_users': 40000, 'baseline_rate': 0.20, 'true_effect': 0.02,",
         "    'covariate_correlation': 0.3, 'seed': 999, 'corrupted_split': None,",
         "    'revenue_mean': 50.0, 'revenue_lift': 0.10, 'revenue_sigma': 1.0,",
+        "    'revenue_covariate_effect': 1.0,",
         "}})",
         "",
         "for metric, options in [('revenue_per_user', {}),",
@@ -286,14 +287,18 @@ cells = [
         "                           **options)",
         "    best = r.cuped_effect or r.raw_effect",
         "    label = metric + (' (winsorized)' if options else '')",
-        "    print(f'{label:32s} {best.method:11s} effect {best.point_estimate:+.3f}  '",
-        "          f'95% CI [{best.ci_lower:+.3f}, {best.ci_upper:+.3f}]')",
+        "    print(f'{label:32s} {best.method:17s} effect {best.point_estimate:+.3f}  '",
+        "          f'95% CI [{best.ci_lower:+.3f}, {best.ci_upper:+.3f}]  '",
+        "          f'(raw CI width {r.raw_effect.ci_upper - r.raw_effect.ci_lower:.2f}, '",
+        "          f'CUPED width {best.ci_upper - best.ci_lower:.2f})')",
     ),
     md(
         "Winsorizing caps the largest orders, which narrows the interval but "
         "also shrinks the estimate toward zero: it measures a capped revenue, "
-        "a slightly different quantity. CUPED applies to revenue per user but "
-        "not to the ratio metric.",
+        "a slightly different quantity. Order values here also rise with the "
+        "pre-period covariate (`revenue_covariate_effect=1.0`), so CUPED helps "
+        "the ratio metric too: it is applied to the delta method's per-user "
+        "linearization (`cuped_delta_ratio`), keeping the same expected effect."
     ),
     md(
         "## 8. More than two arms — Dunnett-adjusted comparisons",

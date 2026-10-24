@@ -69,6 +69,7 @@ from collections.abc import Callable
 from dataclasses import asdict, dataclass, replace
 from functools import partial
 
+import numpy as np
 import pandas as pd
 from sqlalchemy import Connection, Engine
 
@@ -79,11 +80,18 @@ from core.data_access import (
     get_variant_counts,
     split_arms,
 )
-from core.inference import InferenceResult, cuped_adjust, raw_ttest_ci, variance_reduction_pct
+from core.inference import (
+    InferenceResult,
+    cuped_adjust,
+    cuped_ratio_ci,
+    raw_ttest_ci,
+    variance_reduction_pct,
+)
 from core.metrics import (
     MEAN_METRICS,
     control_mean_variance,
     estimate_effect,
+    linearized_ratio,
     metric_outcome,
     validate_metric,
     winsorization_cap,
@@ -263,8 +271,8 @@ def analyze_experiment(
     cuped_by_arm: dict[str, InferenceResult] = {}
     cuped_control_variance = 0.0
     cuped_vr: float | None = None
-    # Ratio metrics have no per-user additive outcome to adjust, so CUPED
-    # applies to mean metrics only.
+    # Mean metrics adjust the per-user outcome directly; the ratio metric
+    # adjusts its delta-method linearization (branch below).
     if use_cuped and metric_name in MEAN_METRICS:
         try:
             y = metric_outcome(df, metric_name, cap)
@@ -285,6 +293,42 @@ def analyze_experiment(
             cuped_vr = variance_reduction_pct(y, adj.y_adjusted)
 
             for arm, result in cuped_by_arm.items():
+                pending_writes.append(partial(
+                    persist_inference_result, experiment_id=experiment_id,
+                    metric_name=metric_name, inference_result=result, srm_result=srm_result,
+                    variant_id=arm_variant_ids[arm],
+                ))
+        except ValueError:
+            cuped_by_arm = {}
+            cuped_vr = None
+    elif use_cuped and metric_name == "revenue_per_conversion":
+        # CUPED on the ratio's per-user linearization, with ONE theta pooled
+        # across every arm (as for mean metrics), so all comparisons share
+        # the same adjusted control and Dunnett's correlation still holds.
+        try:
+            groups = {"control": control_df, **arms}
+            lin = np.concatenate([linearized_ratio(g) for g in groups.values()])
+            cov_x = np.concatenate(
+                [g["pre_period_covariate"].to_numpy(dtype=float) for g in groups.values()]
+            )
+            var_x = cov_x.var(ddof=1)
+            if var_x == 0 or np.isnan(var_x) or np.isnan(lin).any():
+                raise ValueError("unusable covariate for ratio CUPED")
+            theta = float(np.cov(lin, cov_x, ddof=1)[0, 1] / var_x)
+            cuped_vr = float(
+                100 * (1 - (lin - theta * (cov_x - cov_x.mean())).var(ddof=1) / lin.var(ddof=1))
+            )
+            for arm, arm_df in arms.items():
+                result, _, cuped_control_variance = cuped_ratio_ci(
+                    control_df["revenue"].to_numpy(dtype=float),
+                    control_df["n_conversions"].to_numpy(dtype=float),
+                    control_df["pre_period_covariate"].to_numpy(dtype=float),
+                    arm_df["revenue"].to_numpy(dtype=float),
+                    arm_df["n_conversions"].to_numpy(dtype=float),
+                    arm_df["pre_period_covariate"].to_numpy(dtype=float),
+                    theta=theta,
+                )
+                cuped_by_arm[arm] = result
                 pending_writes.append(partial(
                     persist_inference_result, experiment_id=experiment_id,
                     metric_name=metric_name, inference_result=result, srm_result=srm_result,

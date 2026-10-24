@@ -83,7 +83,7 @@ def test_multi_arm_revenue_ratio_metric_with_segments(app):
     _assert_no_failures(app)
     arm_table = next(df.value for df in app.dataframe if "Arm" in df.value.columns)
     assert list(arm_table["Arm"]) == ["treatment", "treatment_b"]
-    assert set(arm_table["Estimator"]) == {"delta_ratio"}
+    assert set(arm_table["Estimator"]) == {"cuped_delta_ratio"}
     segment_headers = [m.value for m in app.markdown if m.value.startswith("**By")]
     assert len(segment_headers) == 2  # one per arm
     assert any("Cochran's Q" in m.value for m in app.markdown)

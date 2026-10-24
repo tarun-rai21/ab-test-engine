@@ -72,6 +72,7 @@ simulations each.
 |---|---|---|---|
 | revenue_per_conversion | delta method | +5.00 | **94.8%** (474/500) |
 | revenue_per_user | Welch | +2.10 | **95.2%** (476/500) |
+| revenue_per_conversion | CUPED on the delta-method linearization (order values tied to the covariate, effect 1.0) | +5.00 | **95.4%** (477/500), mean variance reduction 6.4% |
 
 ## 5. Multi-Arm Family-Wise Error
 

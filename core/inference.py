@@ -271,3 +271,83 @@ def delta_method_ratio_ci(
         n_control=len(numerator_control),
         n_treatment=len(numerator_treatment),
     )
+
+
+def cuped_ratio_ci(
+    numerator_control: np.ndarray,
+    denominator_control: np.ndarray,
+    covariate_control: np.ndarray,
+    numerator_treatment: np.ndarray,
+    denominator_treatment: np.ndarray,
+    covariate_treatment: np.ndarray,
+    alpha: float = 0.05,
+    theta: float | None = None,
+) -> tuple[InferenceResult, float, float]:
+    """
+    CUPED for a RATIO metric (e.g. revenue per conversion), via the
+    delta method's linearization.
+
+    For a ratio R = mean(Y) / mean(N), the delta-method variance equals the
+    variance of the mean of the per-user LINEARIZED value
+
+        L_i = (Y_i - R * N_i) / mean(N)
+
+    (its first-order influence function). CUPED applies to that per-user
+    quantity like any mean metric: theta = Cov(L, X) / Var(X) on the pooled
+    sample (or a caller-supplied theta, e.g. one estimated across every arm
+    of an A/B/n test), and the adjusted effect is
+
+        (R_t - R_c) - theta * (mean(X_t) - mean(X_c))
+
+    with standard error from Var(L - theta * X) in each arm. With theta = 0
+    this reduces exactly to delta_method_ratio_ci. Normal approximation.
+
+    Returns (result, variance_reduction_pct, control_variance): the
+    reduction is 100 * (1 - Var(L_adjusted) / Var(L)) on the pooled
+    linearized values, and control_variance (the control arm's share of the
+    variance) feeds the multi-arm Dunnett adjustment.
+    """
+    def linearized(y, n_, x):
+        y, n_, x = (np.asarray(a, dtype=float) for a in (y, n_, x))
+        if not (len(y) == len(n_) == len(x)):
+            raise ValueError("numerator, denominator and covariate must have equal length")
+        ratio, _ = delta_ratio_variance(y, n_)
+        return ratio, (y - ratio * n_) / n_.mean(), x
+
+    ratio_c, l_c, x_c = linearized(numerator_control, denominator_control, covariate_control)
+    ratio_t, l_t, x_t = linearized(numerator_treatment, denominator_treatment, covariate_treatment)
+
+    l_all = np.concatenate([l_c, l_t])
+    x_all = np.concatenate([x_c, x_t])
+    var_x = x_all.var(ddof=1)
+    if var_x == 0 or np.isnan(var_x):
+        raise ValueError("Covariate has zero variance or contains NaN — cannot compute theta.")
+    if theta is None:
+        theta = np.cov(l_all, x_all, ddof=1)[0, 1] / var_x
+
+    adj_c = l_c - theta * (x_c - x_all.mean())
+    adj_t = l_t - theta * (x_t - x_all.mean())
+    var_c = adj_c.var(ddof=1) / len(adj_c)
+    var_t = adj_t.var(ddof=1) / len(adj_t)
+    se = float(np.sqrt(var_c + var_t))
+    if se == 0 or np.isnan(se):
+        raise ValueError("CUPED ratio standard error is zero or NaN — degenerate input.")
+
+    diff = (ratio_t - ratio_c) - theta * (x_t.mean() - x_c.mean())
+    z_crit = stats.norm.ppf(1 - alpha / 2)
+    adjusted_all = l_all - theta * (x_all - x_all.mean())
+    reduction = float(100 * (1 - adjusted_all.var(ddof=1) / l_all.var(ddof=1)))
+
+    result = InferenceResult(
+        method="cuped_delta_ratio",
+        point_estimate=float(diff),
+        ci_lower=float(diff - z_crit * se),
+        ci_upper=float(diff + z_crit * se),
+        alpha=alpha,
+        p_value=float(2 * stats.norm.sf(abs(diff) / se)),
+        standard_error=se,
+        degrees_freedom=None,
+        n_control=len(l_c),
+        n_treatment=len(l_t),
+    )
+    return result, reduction, float(var_c)

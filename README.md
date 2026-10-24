@@ -174,6 +174,7 @@ Measured by actually running `validation/*.py`, not asserted — see
 | Lan-DeMets FPR, irregular spacing | 5% (band 3.5%–7%) | **5.05%** (101/2000) | Calibrated to each look's actual information fraction, not assumed to be equal. |
 | Revenue per conversion CI coverage (delta method) | 93%–97% | **94.8%** (474/500) | Log-normal order values (σ=1), n=4000. |
 | Revenue per user CI coverage | 93%–97% | **95.2%** (476/500) | Same heavy-tailed order values. |
+| Revenue per conversion CI coverage, CUPED | 93%–97% | **95.4%** (477/500) | Order values tied to the covariate; 6.4% mean variance reduction. |
 | Multi-arm family-wise error (3 null arms) | ≤5% | **4.75%** Dunnett, **4.45%** Holm, **13.05%** unadjusted | 2000 sims, shared control. |
 | Segment heterogeneity (Q test), homogeneous effect | ~5% | **4.60%** | 1000 sims, region segments. |
 | Segment heterogeneity (Q test), real difference | ~87% (theory) | **88.5%** | 200 sims, device-type effects ±0.04. |
@@ -195,7 +196,8 @@ and fixed.
 - **Metrics:** `conversion` (Welch t-test), `revenue_per_user` (Welch,
   optional winsorization at a pooled quantile, CUPED-eligible) and
   `revenue_per_conversion` (average order value — a ratio metric, analysed
-  with the delta method at the user level). Select with
+  with the delta method at the user level, with CUPED applied to its
+  per-user linearization). Select with
   `analyze_experiment(metric_name=...)` or the API's `metric` field.
 - **A/B/n experiments:** any number of treatment arms. Each arm is compared
   with control; step-down Dunnett-adjusted p-values (built from each
@@ -226,7 +228,6 @@ and fixed.
   experiment (in the app, the primary arm), not every arm.
 - The Cochran's Q heterogeneity test has low power with few or small
   segments; a large p-value is not evidence that effects are equal.
-- CUPED is not applied to the ratio metric.
 - The API's `POST /experiments/{id}/assign` only supports `mode="simulate"`;
   real-data ingestion (`mode="ingest"`) is deferred to the Streamlit app's
   upload flow.

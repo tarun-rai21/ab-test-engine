@@ -140,6 +140,7 @@ def seed_database(
         revenue_mean=sim_cfg.get("revenue_mean"),
         revenue_lift=sim_cfg.get("revenue_lift", 0.0),
         revenue_sigma=sim_cfg.get("revenue_sigma", 1.0),
+        revenue_covariate_effect=sim_cfg.get("revenue_covariate_effect", 0.0),
         treatment_arms=sim_cfg.get("treatment_arms"),
         allocation=sim_cfg.get("allocation"),
     )
@@ -245,6 +246,7 @@ def seed_assignments_for_existing_experiment(
         revenue_mean=sim_cfg.get("revenue_mean"),
         revenue_lift=sim_cfg.get("revenue_lift", 0.0),
         revenue_sigma=sim_cfg.get("revenue_sigma", 1.0),
+        revenue_covariate_effect=sim_cfg.get("revenue_covariate_effect", 0.0),
         treatment_arms=sim_cfg.get("treatment_arms"),
         allocation=sim_cfg.get("allocation"),
     )
