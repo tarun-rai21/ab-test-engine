@@ -41,22 +41,15 @@ check — several minutes):
 pytest validation/ -v -s -m slow --tb=short
 ```
 
-## Running with Docker
+## Optional authentication
 
-```bash
-cp .env.example .env          # optionally set API_KEY and APP_PASSWORD
-docker compose up --build
-```
+Both services are open by default for local use. To require credentials,
+set environment variables before starting them:
 
-- API on http://localhost:8000 (docs at `/docs`, health at `/health`).
-  With `API_KEY` set, every data endpoint requires an `X-API-Key` header.
-- Streamlit on http://localhost:8501. With `APP_PASSWORD` set, it asks for
-  the password once per browser session.
-- The API's SQLite database lives in the `ab-data` volume. Both containers
-  run as an unprivileged user, and each image installs only its own
-  dependencies: `requirements-api.txt` for the API, `requirements.txt` (API
-  plus Streamlit) for the app. `requirements-dev.txt` adds the test and lint
-  tools for local development and CI.
+- `API_KEY` — every data endpoint then requires the same value in an
+  `X-API-Key` header (`/` and `/health` stay open). `GET /health` returns
+  200 only when the database answers a query.
+- `APP_PASSWORD` — the Streamlit app asks for it once per browser session.
 
 ## Why this exists
 
@@ -257,11 +250,10 @@ and fixed.
   across arms.
 - The Cochran's Q heterogeneity test has low power with few or small
   segments; a large p-value is not evidence that effects are equal.
-- Deployment is a single-node setup: SQLite in a volume, one API key
-  rather than per-user accounts, and no TLS termination or rate limiting
-  (put it behind a reverse proxy for that). `DATABASE_URL` can point at
-  Postgres, but the driver is not in `requirements.txt` and the schema is
-  only tested on SQLite.
+- No deployment setup is included. Authentication is one shared API key
+  (not per-user accounts), with no TLS or rate limiting. `DATABASE_URL` can
+  point at Postgres, but the driver is not in `requirements.txt` and the
+  schema is only tested on SQLite.
 - Real data must arrive as one row per user (variant, conversion and
   optional revenue, covariate and segments); event-level logs need
   aggregating to users first.
