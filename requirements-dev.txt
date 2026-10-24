@@ -1,0 +1,6 @@
+# Development: run both services, the test suites and the linters.
+-r requirements.txt
+pytest==9.1.1
+httpx2==2.13.1  # FastAPI's TestClient
+ruff==0.15.20
+black==26.5.1

@@ -18,7 +18,7 @@ interactive report app.
 git clone <repo_url>
 cd ab-test-engine
 python -m venv venv && source venv/bin/activate   # Windows: venv\Scripts\activate
-pip install -r requirements.txt
+pip install -r requirements-dev.txt   # runtime + test/lint tools
 pytest -m "not slow"
 ```
 
@@ -53,7 +53,10 @@ docker compose up --build
 - Streamlit on http://localhost:8501. With `APP_PASSWORD` set, it asks for
   the password once per browser session.
 - The API's SQLite database lives in the `ab-data` volume. Both containers
-  run as an unprivileged user.
+  run as an unprivileged user, and each image installs only its own
+  dependencies: `requirements-api.txt` for the API, `requirements.txt` (API
+  plus Streamlit) for the app. `requirements-dev.txt` adds the test and lint
+  tools for local development and CI.
 
 ## Why this exists
 
