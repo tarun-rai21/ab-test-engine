@@ -194,6 +194,32 @@ def variance_reduction_pct(y_raw: np.ndarray, y_cuped: np.ndarray) -> float:
     return float(100 * (1 - var_cuped / var_raw))
 
 
+def delta_ratio_variance(numerator: np.ndarray, denominator: np.ndarray) -> tuple[float, float]:
+    """
+    One arm's ratio R = mean(Y) / mean(N) and its delta-method variance
+    (see delta_method_ratio_ci for the formula). Returned separately so the
+    control arm's variance can feed multiple-comparison adjustments.
+    """
+    y = np.asarray(numerator, dtype=float)
+    n_ = np.asarray(denominator, dtype=float)
+    if len(y) != len(n_):
+        raise ValueError("numerator and denominator arrays must have equal length")
+    if len(y) < 2:
+        raise ValueError(f"Need at least 2 users per arm, got {len(y)}")
+    mean_y, mean_n = y.mean(), n_.mean()
+    if mean_n == 0:
+        raise ValueError(
+            "Denominator mean is zero (no conversions in an arm) — ratio undefined."
+        )
+    cov = np.cov(y, n_, ddof=1)
+    var = (
+        cov[0, 0] / mean_n**2
+        - 2 * mean_y * cov[0, 1] / mean_n**3
+        + mean_y**2 * cov[1, 1] / mean_n**4
+    ) / len(y)
+    return float(mean_y / mean_n), float(var)
+
+
 def delta_method_ratio_ci(
     numerator_control: np.ndarray,
     denominator_control: np.ndarray,
@@ -222,28 +248,8 @@ def delta_method_ratio_ci(
     Sanity identity (tested): if every user has N = 1, R is just mean(Y)
     and Var(R) reduces to s_Y^2 / n — the Welch standard error.
     """
-    def ratio_and_variance(y: np.ndarray, n_: np.ndarray) -> tuple[float, float]:
-        y = np.asarray(y, dtype=float)
-        n_ = np.asarray(n_, dtype=float)
-        if len(y) != len(n_):
-            raise ValueError("numerator and denominator arrays must have equal length")
-        if len(y) < 2:
-            raise ValueError(f"Need at least 2 users per arm, got {len(y)}")
-        mean_y, mean_n = y.mean(), n_.mean()
-        if mean_n == 0:
-            raise ValueError(
-                "Denominator mean is zero (no conversions in an arm) — ratio undefined."
-            )
-        cov = np.cov(y, n_, ddof=1)
-        var = (
-            cov[0, 0] / mean_n**2
-            - 2 * mean_y * cov[0, 1] / mean_n**3
-            + mean_y**2 * cov[1, 1] / mean_n**4
-        ) / len(y)
-        return mean_y / mean_n, var
-
-    ratio_c, var_c = ratio_and_variance(numerator_control, denominator_control)
-    ratio_t, var_t = ratio_and_variance(numerator_treatment, denominator_treatment)
+    ratio_c, var_c = delta_ratio_variance(numerator_control, denominator_control)
+    ratio_t, var_t = delta_ratio_variance(numerator_treatment, denominator_treatment)
 
     diff = ratio_t - ratio_c
     se = float(np.sqrt(var_c + var_t))

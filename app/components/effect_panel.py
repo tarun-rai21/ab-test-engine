@@ -41,25 +41,31 @@ def _render_ci_bar(raw_effect: InferenceResult, cuped_effect: InferenceResult | 
     st.pyplot(fig)
 
 
-def _render_arm_table(comparisons) -> None:
-    """Every treatment arm vs control, with Holm-adjusted p-values."""
+def _render_arm_table(comparisons, method: str) -> None:
+    """Every treatment arm vs control, with family-wise adjusted p-values."""
+    label = method.capitalize()
     rows = []
     for c in comparisons:
         best = c.cuped_effect or c.raw_effect
-        best_p = c.cuped_p_value_holm if c.cuped_effect is not None else c.raw_p_value_holm
+        best_p = (
+            c.cuped_p_value_adjusted if c.cuped_effect is not None else c.raw_p_value_adjusted
+        )
         rows.append({
             "Arm": c.treatment_arm,
             "Effect vs control": f"{best.point_estimate:+.4f}",
             "95% CI": f"[{best.ci_lower:.4f}, {best.ci_upper:.4f}]",
             "Estimator": best.method,
             "p-value": f"{best.p_value:.4g}",
-            "Holm-adjusted p": f"{best_p:.4g}",
-            "Significant (Holm)": "Yes" if best_p < 0.05 else "No",
+            f"{label}-adjusted p": f"{best_p:.4g}",
+            f"Significant ({label})": "Yes" if best_p < 0.05 else "No",
         })
     st.dataframe(pd.DataFrame(rows), hide_index=True, width="stretch")
     st.caption(
-        "Each arm is compared with control. Holm-adjusted p-values control the "
-        "chance of declaring ANY arm a false winner at 5%. Unadjusted CIs are shown."
+        f"Each arm is compared with control. {label}-adjusted p-values control the "
+        "chance of declaring ANY arm a false winner at 5%"
+        + (" (Dunnett uses the correlation created by the shared control group, "
+           "so it is less conservative than Holm)" if method == "dunnett" else "")
+        + ". Unadjusted CIs are shown."
     )
 
 
@@ -68,11 +74,12 @@ def render_effect_panel(
     cuped_effect: InferenceResult | None,
     cuped_variance_reduction_pct: float | None,
     comparisons: tuple = (),
+    multiple_comparison: str = "dunnett",
 ) -> None:
     st.subheader("Effect Estimate")
 
     if len(comparisons) > 1:
-        _render_arm_table(comparisons)
+        _render_arm_table(comparisons, multiple_comparison)
         st.markdown(f"**Primary comparison: `{comparisons[0].treatment_arm}` vs control**")
 
     _render_ci_bar(raw_effect, cuped_effect)

@@ -174,7 +174,7 @@ Measured by actually running `validation/*.py`, not asserted — see
 | Lan-DeMets FPR, irregular spacing | 5% (band 3.5%–7%) | **5.05%** (101/2000) | Calibrated to each look's actual information fraction, not assumed to be equal. |
 | Revenue per conversion CI coverage (delta method) | 93%–97% | **94.8%** (474/500) | Log-normal order values (σ=1), n=4000. |
 | Revenue per user CI coverage | 93%–97% | **95.2%** (476/500) | Same heavy-tailed order values. |
-| Multi-arm family-wise error (3 null arms) | ≤5% | **4.45%** Holm vs **13.05%** unadjusted | 2000 sims, shared control. |
+| Multi-arm family-wise error (3 null arms) | ≤5% | **4.75%** Dunnett, **4.45%** Holm, **13.05%** unadjusted | 2000 sims, shared control. |
 | Segment heterogeneity (Q test), homogeneous effect | ~5% | **4.60%** | 1000 sims, region segments. |
 | Segment heterogeneity (Q test), real difference | ~87% (theory) | **88.5%** | 200 sims, device-type effects ±0.04. |
 | Segment recovery (deliberately heterogeneous) | Correct sign, magnitude within noise | **Mobile: +0.147** (configured +0.15); **Desktop: -0.070** (configured -0.08) | Effect-reversal flag correctly fired on the significantly opposite segment. |
@@ -198,8 +198,10 @@ and fixed.
   with the delta method at the user level). Select with
   `analyze_experiment(metric_name=...)` or the API's `metric` field.
 - **A/B/n experiments:** any number of treatment arms. Each arm is compared
-  with control; Holm-adjusted p-values control the family-wise error rate
-  across arms (`AnalysisReport.comparisons`).
+  with control; step-down Dunnett-adjusted p-values (built from each
+  comparison's own standard error and the shared-control correlation)
+  control the family-wise error rate across arms, with Holm as an option
+  (`multiple_comparison=`, `AnalysisReport.comparisons`).
 - **Segment heterogeneity:** Cochran's Q test of whether segment effects
   differ, and one Benjamini-Hochberg correction across every segment, column
   and arm in a report.
@@ -218,8 +220,8 @@ and fixed.
   nothing (those looks cannot reject), and changing the plan mid-test
   is not supported. The index-based O'Brien-Fleming schedule remains
   available (`spending="obrien_fleming"`) for planned equal spacing.
-- Multi-arm comparisons use Holm, which ignores the correlation created by
-  the shared control group; Dunnett's test would be slightly more powerful.
+- The multi-arm Dunnett adjustment uses the large-sample normal
+  approximation for the joint distribution of the comparisons.
   The sequential-peeking check monitors a single stored p-value series per
   experiment (in the app, the primary arm), not every arm.
 - The Cochran's Q heterogeneity test has low power with few or small

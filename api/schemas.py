@@ -20,7 +20,7 @@ from __future__ import annotations
 
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import AliasChoices, BaseModel, ConfigDict, Field
 
 # ===================================================================== #
 # POST /experiments
@@ -112,6 +112,8 @@ class AnalyzeRequest(BaseModel):
     # Peeking correction: "lan_demets" (information-based, any look timing)
     # or "obrien_fleming" (index-based, planned equal spacing only).
     spending: Literal["lan_demets", "obrien_fleming"] = "lan_demets"
+    # A/B/n p-value adjustment across arms.
+    multiple_comparison: Literal["dunnett", "holm"] = "dunnett"
 
 
 class SRMResultSchema(BaseModel):
@@ -174,9 +176,16 @@ class ArmComparisonSchema(BaseModel):
     model_config = ConfigDict(from_attributes=True)
     treatment_arm: str
     raw_effect: InferenceResultSchema
-    raw_p_value_holm: float
+    # Reports stored before the Dunnett option used *_holm field names;
+    # accept them so GET /report still serves those stored reports.
+    raw_p_value_adjusted: float = Field(
+        validation_alias=AliasChoices("raw_p_value_adjusted", "raw_p_value_holm")
+    )
     cuped_effect: InferenceResultSchema | None
-    cuped_p_value_holm: float | None
+    cuped_p_value_adjusted: float | None = Field(
+        default=None,
+        validation_alias=AliasChoices("cuped_p_value_adjusted", "cuped_p_value_holm"),
+    )
 
 
 class AnalysisReportSchema(BaseModel):
@@ -197,3 +206,5 @@ class AnalysisReportSchema(BaseModel):
     segments: tuple[SegmentAnalysisResultSchema, ...] | None
     winsorization_cap: float | None = None
     comparisons: tuple[ArmComparisonSchema, ...] = ()
+    # Older stored reports predate the option and were always Holm-adjusted.
+    multiple_comparison: str = "holm"

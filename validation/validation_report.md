@@ -77,7 +77,8 @@ simulations each.
 
 Three treatment arms with no real effect, 2000 per arm, 2000 simulations:
 unadjusted "any arm significant" rate **13.05%**; with Holm adjustment
-**4.45%**.
+**4.45%**; with step-down Dunnett (the default) **4.75%** — controlled, and
+closer to nominal because it uses the shared-control correlation.
 
 ## 6. Segment Heterogeneity (Cochran's Q)
 

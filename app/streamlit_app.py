@@ -148,6 +148,7 @@ st.divider()
 render_effect_panel(
     report.raw_effect, report.cuped_effect, report.cuped_variance_reduction_pct,
     comparisons=report.comparisons,
+    multiple_comparison=report.multiple_comparison,
 )
 st.divider()
 

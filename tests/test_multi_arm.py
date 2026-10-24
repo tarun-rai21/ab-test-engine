@@ -130,9 +130,9 @@ def test_pipeline_compares_every_arm_against_control(isolated_db):
 
     strong, null = by_arm["treatment"], by_arm["treatment_b"]
     assert strong.raw_effect.ci_lower < 0.04 < strong.raw_effect.ci_upper
-    assert strong.raw_p_value_holm < 0.05
-    assert null.raw_p_value_holm >= null.raw_effect.p_value
-    assert strong.cuped_effect is not None and strong.cuped_p_value_holm is not None
+    assert strong.raw_p_value_adjusted < 0.05
+    assert null.raw_p_value_adjusted >= null.raw_effect.p_value
+    assert strong.cuped_effect is not None and strong.cuped_p_value_adjusted is not None
 
     assert {s.treatment_arm for s in report.segments} == {"treatment", "treatment_b"}
 
@@ -154,7 +154,7 @@ def test_two_arm_report_has_single_comparison_with_unadjusted_p(isolated_db):
     assert len(report.comparisons) == 1
     only = report.comparisons[0]
     assert only.treatment_arm == "treatment"
-    assert only.raw_p_value_holm == pytest.approx(only.raw_effect.p_value)
+    assert only.raw_p_value_adjusted == pytest.approx(only.raw_effect.p_value)
 
 
 # --------------------------------------------------------------------- #

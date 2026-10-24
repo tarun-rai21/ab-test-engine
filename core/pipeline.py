@@ -82,12 +82,13 @@ from core.data_access import (
 from core.inference import InferenceResult, cuped_adjust, raw_ttest_ci, variance_reduction_pct
 from core.metrics import (
     MEAN_METRICS,
+    control_mean_variance,
     estimate_effect,
     metric_outcome,
     validate_metric,
     winsorization_cap,
 )
-from core.multiple_testing import holm_adjust
+from core.multiple_testing import ADJUSTMENTS, dunnett_adjust, holm_adjust
 from core.persistence import persist_inference_result, persist_report, persist_srm_result
 from core.segments import SegmentAnalysisResult, apply_global_bh, segment_breakdown
 from core.sequential import SequentialCheckResult, sequential_check
@@ -96,14 +97,16 @@ from core.validity import SRMResult, achievable_mde_from_se, mde_curve, srm_chec
 
 @dataclass(frozen=True)
 class ArmComparison:
-    """One treatment arm vs control. Holm-adjusted p-values control the
-    family-wise error rate across all arms (equal to the raw p-value when
-    there is a single arm)."""
+    """
+    One treatment arm vs control. Adjusted p-values control the family-wise
+    error rate across all arms (AnalysisReport.multiple_comparison says
+    how); with a single arm they equal the raw p-value.
+    """
     treatment_arm: str
     raw_effect: InferenceResult
-    raw_p_value_holm: float
+    raw_p_value_adjusted: float
     cuped_effect: InferenceResult | None
-    cuped_p_value_holm: float | None
+    cuped_p_value_adjusted: float | None
 
 
 @dataclass(frozen=True)
@@ -124,6 +127,22 @@ class AnalysisReport:
     segments: tuple[SegmentAnalysisResult, ...] | None  # None if segment_columns not requested
     winsorization_cap: float | None = None  # revenue_per_user cap applied, if any
     comparisons: tuple[ArmComparison, ...] = ()  # every treatment arm vs control
+    multiple_comparison: str = "dunnett"  # "dunnett" | "holm" — see core.multiple_testing
+
+
+def _adjust_p_values(
+    results: list[InferenceResult], control_variance: float, method: str
+) -> list[float]:
+    """Family-wise adjusted p-values across arms (see core.multiple_testing)."""
+    raw = [r.p_value for r in results]
+    if method == "holm":
+        return holm_adjust(raw)
+    return dunnett_adjust(
+        [r.point_estimate for r in results],
+        [r.standard_error for r in results],
+        control_variance,
+        raw_p_values=raw,
+    )
 
 
 def analyze_experiment(
@@ -137,6 +156,7 @@ def analyze_experiment(
     persist: bool = True,
     spending: str = "lan_demets",
     winsorize_quantile: float | None = None,
+    multiple_comparison: str = "dunnett",
 ) -> AnalysisReport:
     """
     Runs the full spec Section 4.4 sequence for one experiment and returns a
@@ -150,6 +170,10 @@ def analyze_experiment(
     peeking check with this schedule. Omit both to use the schedule stored
     on the experiment, if any (see design decision 4); passing only one is
     a ValueError.
+
+    multiple_comparison: how arm p-values are adjusted in A/B/n tests —
+    "dunnett" (default; step-down, uses the shared-control correlation) or
+    "holm" (valid under any dependence, more conservative).
 
     spending: "lan_demets" (default, information-based — valid for any
     look timing) or "obrien_fleming" (index-based, exact only for the
@@ -178,6 +202,10 @@ def analyze_experiment(
     # when none are, per get_inference_data()'s own segment_columns
     # contract (Step 1).
     validate_metric(metric_name)
+    if multiple_comparison not in ADJUSTMENTS:
+        raise ValueError(
+            f"multiple_comparison must be one of {ADJUSTMENTS}, got {multiple_comparison!r}"
+        )
     df = get_inference_data(
         engine, experiment_id, segment_columns=segment_columns or []
     )
@@ -195,7 +223,11 @@ def analyze_experiment(
         arm: estimate_effect(control_df, arm_df, metric_name, cap)
         for arm, arm_df in arms.items()
     }
-    raw_holm = dict(zip(raw_by_arm, holm_adjust([r.p_value for r in raw_by_arm.values()])))
+    raw_adjusted = dict(zip(raw_by_arm, _adjust_p_values(
+        list(raw_by_arm.values()),
+        control_mean_variance(control_df, metric_name, cap),
+        multiple_comparison,
+    )))
 
     # Writes are QUEUED and committed together at the end (one transaction),
     # so a failure anywhere in the analysis leaves the database untouched —
@@ -229,6 +261,7 @@ def analyze_experiment(
 
     # --- CUPED: optional, and itself fault-tolerant for the same reason.
     cuped_by_arm: dict[str, InferenceResult] = {}
+    cuped_control_variance = 0.0
     cuped_vr: float | None = None
     # Ratio metrics have no per-user additive outcome to adjust, so CUPED
     # applies to mean metrics only.
@@ -241,6 +274,8 @@ def analyze_experiment(
             df_adjusted = df.copy()
             df_adjusted["outcome_cuped"] = adj.y_adjusted
             control_adj, arms_adj = split_arms(df_adjusted)
+            control_outcome = control_adj["outcome_cuped"].to_numpy(dtype=float)
+            cuped_control_variance = float(control_outcome.var(ddof=1) / len(control_outcome))
             for arm, arm_adj in arms_adj.items():
                 cuped_raw = raw_ttest_ci(
                     control_adj["outcome_cuped"].to_numpy(dtype=float),
@@ -258,8 +293,10 @@ def analyze_experiment(
         except ValueError:
             cuped_by_arm = {}
             cuped_vr = None
-    cuped_holm = (
-        dict(zip(cuped_by_arm, holm_adjust([r.p_value for r in cuped_by_arm.values()])))
+    cuped_adjusted = (
+        dict(zip(cuped_by_arm, _adjust_p_values(
+            list(cuped_by_arm.values()), cuped_control_variance, multiple_comparison
+        )))
         if cuped_by_arm else {}
     )
 
@@ -321,9 +358,9 @@ def analyze_experiment(
         ArmComparison(
             treatment_arm=arm,
             raw_effect=raw_by_arm[arm],
-            raw_p_value_holm=raw_holm[arm],
+            raw_p_value_adjusted=raw_adjusted[arm],
             cuped_effect=cuped_by_arm.get(arm),
-            cuped_p_value_holm=cuped_holm.get(arm),
+            cuped_p_value_adjusted=cuped_adjusted.get(arm),
         )
         for arm in arms
     )
@@ -341,6 +378,7 @@ def analyze_experiment(
         segments=segments,
         winsorization_cap=cap,
         comparisons=comparisons,
+        multiple_comparison=multiple_comparison,
     )
 
     if persist:
@@ -354,6 +392,7 @@ def analyze_experiment(
                 "checkpoint_n": checkpoint_n,
                 "spending": spending,
                 "winsorize_quantile": winsorize_quantile,
+                "multiple_comparison": multiple_comparison,
             },
         ))
         with engine.begin() as conn:
