@@ -384,3 +384,31 @@ def test_sequential_check_rejects_unknown_spending():
             [{"cumulative_n": 200, "p_value_at_check": 0.5}],
             n_checkpoints_planned=10, checkpoint_n=200, spending="pocock",
         )
+
+
+def test_vectorized_checkpoint_p_values_match_raw_ttest_ci():
+    """
+    simulate_peeking_fpr computes all checkpoint t-tests at once from
+    cumulative sums; every p-value must equal raw_ttest_ci() on the same
+    slices (the per-test implementation it replaced).
+    """
+    from core.inference import raw_ttest_ci
+    from core.sequential import _welch_p_values_at_checkpoints
+
+    rng = np.random.default_rng(3)
+    control = rng.binomial(1, 0.1, (5, 1000)).astype(float)
+    treatment = rng.binomial(1, 0.12, (5, 1000)).astype(float)
+    sizes = [50, 120, 400, 1000]
+
+    vectorized = _welch_p_values_at_checkpoints(control, treatment, sizes)
+    for sim in range(5):
+        for k, n in enumerate(sizes):
+            expected = raw_ttest_ci(control[sim, :n], treatment[sim, :n]).p_value
+            assert vectorized[sim, k] == pytest.approx(expected, rel=1e-9, abs=1e-15)
+
+
+def test_vectorized_p_value_is_one_when_both_arms_are_constant():
+    from core.sequential import _welch_p_values_at_checkpoints
+
+    zeros = np.zeros((1, 10))
+    assert _welch_p_values_at_checkpoints(zeros, zeros, [5, 10]).tolist() == [[1.0, 1.0]]

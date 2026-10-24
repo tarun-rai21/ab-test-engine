@@ -42,7 +42,8 @@ cells = [
         "experiment with a **known, configured ground truth** → check "
         "randomization validity → estimate the effect (raw and CUPED) → "
         "demonstrate the peeking-inflation problem and its correction → "
-        "break the result down by segment and flag effect reversals.",
+        "break the result down by segment and flag effect reversals → "
+        "handle irregular look times, revenue metrics and multi-arm tests.",
         "",
         "Every number below is produced by running this project's own code "
         "— nothing here is fabricated or asserted from theory. Run this "
@@ -60,7 +61,10 @@ cells = [
         "from core.data_access import get_inference_data, split_by_variant",
         "from core.inference import raw_ttest_ci, cuped_adjust, variance_reduction_pct",
         "from core.pipeline import analyze_experiment",
-        "from core.sequential import alpha_spending_schedule, simulate_peeking_fpr",
+        "from core.data_access import get_stored_report",
+        "from core.sequential import (",
+        "    alpha_spending_schedule, lan_demets_boundary, sequential_check, simulate_peeking_fpr,",
+        ")",
         "from data_sim.simulator import ExperimentSimulator",
         "from db.connection import get_engine, init_schema, reset_engine",
         "from db.seed import seed_database",
@@ -202,6 +206,122 @@ cells = [
         "    flag = ' <-- EFFECT REVERSAL' if s.reversal_flag else ''",
         "    print(f'{s.segment_value:10s}: {s.inference.point_estimate:+.4f}  '",
         "          f'(p={s.inference.p_value:.4g}, BH-significant={s.bh_significant}){flag}')",
+        "",
+        "device = report2.segments[0]",
+        "print(f\"\\nDo the segment effects differ? Cochran's Q = {device.heterogeneity_q:.1f}, \"",
+        "      f'p = {device.heterogeneity_p_value:.3g}')",
+    ),
+    md(
+        "Per-segment significance alone cannot show that segments *differ* — "
+        "one segment may simply have less data. Cochran's Q tests the "
+        "difference directly (equivalent to a treatment × segment interaction "
+        "test). When several columns or arms are analysed, one "
+        "Benjamini-Hochberg correction runs across every segment test in the "
+        "report.",
+    ),
+    md(
+        "## 6. Irregular look times — the Lan-DeMets boundary",
+        "",
+        "The O'Brien-Fleming schedule in section 4 assumes looks happen at the "
+        "planned, equally spaced sample sizes. Real teams check when they "
+        "check. The Lan-DeMets boundary spends alpha by each look's "
+        "**information fraction** (cumulative n / planned total n), so it stays "
+        "exact under any spacing.",
+    ),
+    code(
+        "irregular = [120, 300, 550, 700, 1000, 1250, 1500, 1650, 1800, 2000]  # per arm",
+        "fractions = [n / irregular[-1] for n in irregular]",
+        "",
+        "for name, schedule in [",
+        "    (\"Index-based O'Brien-Fleming\", alpha_spending_schedule(10)),",
+        "    ('Lan-DeMets (information-based)', lan_demets_boundary(fractions)),",
+        "]:",
+        "    result = simulate_peeking_fpr(n_simulations=2000, n_checkpoints=10,",
+        "                                  checkpoint_ns=irregular, threshold_schedule=schedule,",
+        "                                  seed=2024)",
+        "    print(f'{name:32s} false-positive rate under irregular looks: '",
+        "          f'{result.empirical_fpr:.2%}')",
+        "",
+        "# Planned 10 looks of 200 users, but only two actual looks, at n=1000 and n=2000:",
+        "looks = [{'cumulative_n': 1000, 'p_value_at_check': 0.20},",
+        "         {'cumulative_n': 2000, 'p_value_at_check': 0.045}]",
+        "for spending in ('obrien_fleming', 'lan_demets'):",
+        "    check = sequential_check(looks, n_checkpoints_planned=10, checkpoint_n=200,",
+        "                             spending=spending)",
+        "    print(f'{spending:15s} final threshold {check.corrected_threshold:.4f} -> '",
+        "          f'p=0.045 significant: {check.corrected_significant}')",
+    ),
+    md(
+        "The index-based schedule treats the n=2000 look as look 10 of 10, as "
+        "if nine earlier looks had spent alpha. Lan-DeMets knows only one "
+        "earlier look happened, so it allows a threshold close to 0.05.",
+    ),
+    md(
+        "## 7. Revenue metrics — heavy tails and a ratio metric",
+        "",
+        "Conversion is not the only outcome that matters. The simulator can "
+        "attach log-normal (heavily right-skewed) order values to conversions. "
+        "Here the treatment raises conversion by +0.02 and average order value "
+        "by +10% on a mean of 50, so the true effects are known:",
+        "",
+        "- **revenue per user** (0 for non-converters): "
+        "0.22 × 55 − 0.20 × 50 = **+2.10**, analysed with Welch's t-test, "
+        "optionally winsorized;",
+        "- **revenue per conversion** (average order value): 50 × 0.10 = "
+        "**+5.00**. This is a ratio of two random per-user quantities, so it "
+        "uses the **delta method** at the user level rather than treating "
+        "orders as independent observations.",
+    ),
+    code(
+        "seed_database({'simulator': {",
+        "    'n_users': 40000, 'baseline_rate': 0.20, 'true_effect': 0.02,",
+        "    'covariate_correlation': 0.3, 'seed': 999, 'corrupted_split': None,",
+        "    'revenue_mean': 50.0, 'revenue_lift': 0.10, 'revenue_sigma': 1.0,",
+        "}})",
+        "",
+        "for metric, options in [('revenue_per_user', {}),",
+        "                        ('revenue_per_user', {'winsorize_quantile': 0.99}),",
+        "                        ('revenue_per_conversion', {})]:",
+        "    r = analyze_experiment(engine, 'exp_seed999', metric_name=metric, persist=False,",
+        "                           **options)",
+        "    best = r.cuped_effect or r.raw_effect",
+        "    label = metric + (' (winsorized)' if options else '')",
+        "    print(f'{label:32s} {best.method:11s} effect {best.point_estimate:+.3f}  '",
+        "          f'95% CI [{best.ci_lower:+.3f}, {best.ci_upper:+.3f}]')",
+    ),
+    md(
+        "Winsorizing caps the largest orders, which narrows the interval but "
+        "also shrinks the estimate toward zero: it measures a capped revenue, "
+        "a slightly different quantity. CUPED applies to revenue per user but "
+        "not to the ratio metric.",
+    ),
+    md(
+        "## 8. More than two arms — Holm-adjusted comparisons",
+        "",
+        "With several treatment arms, each compared with control, the chance "
+        "that *some* arm looks like a winner by luck grows with the number of "
+        "arms. Holm-adjusted p-values hold that family-wise error at 5%. Here "
+        "`treatment` has a real +0.03 effect and `treatment_b` has none.",
+    ),
+    code(
+        "seed_database({'simulator': {",
+        "    'n_users': 30000, 'baseline_rate': 0.10, 'true_effect': 0.0,",
+        "    'covariate_correlation': 0.3, 'seed': 1001, 'corrupted_split': None,",
+        "    'treatment_arms': {'treatment': 0.03, 'treatment_b': 0.0},",
+        "}})",
+        "",
+        "report3 = analyze_experiment(engine, 'exp_seed1001')",
+        "print(f'SRM across 3 variants flagged: {report3.srm.flagged}')",
+        "for c in report3.comparisons:",
+        "    effect = c.cuped_effect or c.raw_effect",
+        "    p_holm = c.cuped_p_value_holm if c.cuped_effect else c.raw_p_value_holm",
+        "    print(f'{c.treatment_arm:12s} effect {effect.point_estimate:+.4f}  '",
+        "          f'p={effect.p_value:.3g}  Holm p={p_holm:.3g}  '",
+        "          f'significant={p_holm < 0.05}')",
+        "",
+        "stored = get_stored_report(engine, 'exp_seed1001', 'conversion')",
+        "print('\\nStored report available for GET /report, computed at',",
+        "      stored['computed_at'])",
     ),
     md(
         "## Summary",
@@ -220,7 +340,15 @@ cells = [
         "4. **Segment analysis correctly recovers a deliberately configured "
         "heterogeneous effect** and flags the segment that disagrees in "
         "direction with the pooled result — a sign-reversing heterogeneity "
-        "the pooled number alone would hide.",
+        "the pooled number alone would hide — and the Q test confirms the "
+        "segment effects differ.",
+        "5. **Lan-DeMets** keeps the false-positive rate at 5% when looks "
+        "happen at irregular times, and does not over-penalise looks that "
+        "never happened.",
+        "6. **Revenue metrics** recover known effects on heavy-tailed data, "
+        "with the delta method for the ratio metric.",
+        "7. **Multi-arm tests** separate a real winner from a null arm with "
+        "Holm-adjusted p-values.",
         "",
     ),
 ]

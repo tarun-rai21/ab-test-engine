@@ -65,10 +65,12 @@ DESIGN DECISIONS, made explicit here rather than left implicit in code:
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import asdict, dataclass, replace
+from functools import partial
 
 import pandas as pd
-from sqlalchemy import Engine
+from sqlalchemy import Connection, Engine
 
 from core.data_access import (
     get_inference_data,
@@ -195,13 +197,17 @@ def analyze_experiment(
     }
     raw_holm = dict(zip(raw_by_arm, holm_adjust([r.p_value for r in raw_by_arm.values()])))
 
-    if persist:
-        persist_srm_result(engine, experiment_id, srm_result)
-        for arm, result in raw_by_arm.items():
-            persist_inference_result(
-                engine, experiment_id, metric_name, result, srm_result,
-                variant_id=arm_variant_ids[arm],
-            )
+    # Writes are QUEUED and committed together at the end (one transaction),
+    # so a failure anywhere in the analysis leaves the database untouched —
+    # including any earlier persisted analysis of this experiment.
+    pending_writes: list[Callable[[Connection], None]] = [
+        partial(persist_srm_result, experiment_id=experiment_id, srm_result=srm_result)
+    ]
+    for arm, result in raw_by_arm.items():
+        pending_writes.append(partial(
+            persist_inference_result, experiment_id=experiment_id, metric_name=metric_name,
+            inference_result=result, srm_result=srm_result, variant_id=arm_variant_ids[arm],
+        ))
 
     # --- Achievable MDE: context, not a gate. A failure here (e.g. observed
     # baseline_rate is exactly 0 or 1) should not take down the whole report.
@@ -243,12 +249,12 @@ def analyze_experiment(
                 cuped_by_arm[arm] = replace(cuped_raw, method="cuped")
             cuped_vr = variance_reduction_pct(y, adj.y_adjusted)
 
-            if persist:
-                for arm, result in cuped_by_arm.items():
-                    persist_inference_result(
-                        engine, experiment_id, metric_name, result, srm_result,
-                        variant_id=arm_variant_ids[arm],
-                    )
+            for arm, result in cuped_by_arm.items():
+                pending_writes.append(partial(
+                    persist_inference_result, experiment_id=experiment_id,
+                    metric_name=metric_name, inference_result=result, srm_result=srm_result,
+                    variant_id=arm_variant_ids[arm],
+                ))
         except ValueError:
             cuped_by_arm = {}
             cuped_vr = None
@@ -298,13 +304,14 @@ def analyze_experiment(
                 analysis = replace(analysis, treatment_arm=arm)
                 segment_results.append(analysis)
 
-                if persist:
-                    for segment_result in analysis.segments:
-                        persist_inference_result(
-                            engine, experiment_id, metric_name, segment_result.inference,
-                            srm_result, segment=f"{column}:{segment_result.segment_value}",
-                            variant_id=arm_variant_ids[arm],
-                        )
+                for segment_result in analysis.segments:
+                    pending_writes.append(partial(
+                        persist_inference_result, experiment_id=experiment_id,
+                        metric_name=metric_name, inference_result=segment_result.inference,
+                        srm_result=srm_result,
+                        segment=f"{column}:{segment_result.segment_value}",
+                        variant_id=arm_variant_ids[arm],
+                    ))
 
         # One BH procedure across every column x arm tested, not one per
         # column (see core.segments.apply_global_bh).
@@ -337,8 +344,9 @@ def analyze_experiment(
     )
 
     if persist:
-        persist_report(
-            engine, experiment_id, metric_name, asdict(report),
+        pending_writes.append(partial(
+            persist_report, experiment_id=experiment_id, metric_name=metric_name,
+            report_payload=asdict(report),
             parameters={
                 "use_cuped": use_cuped,
                 "segment_columns": list(segment_columns or []),
@@ -347,6 +355,9 @@ def analyze_experiment(
                 "spending": spending,
                 "winsorize_quantile": winsorize_quantile,
             },
-        )
+        ))
+        with engine.begin() as conn:
+            for write in pending_writes:
+                write(conn)
 
     return report

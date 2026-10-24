@@ -625,3 +625,47 @@ def test_sequential_check_spending_option_flows_through_pipeline(isolated_db):
 
     assert ld.spending == "lan_demets" and ld.corrected_significant is True
     assert obf.spending == "obrien_fleming" and obf.corrected_significant is False
+
+
+def test_failed_analysis_writes_nothing_and_keeps_previous_results(isolated_db, monkeypatch):
+    """
+    All of an analysis's writes (result rows, SRM row, stored report) share
+    one transaction: if the last write fails, nothing from the failed run is
+    committed and the previous successful analysis is left intact.
+    """
+    import core.pipeline as pipeline
+
+    engine = isolated_db
+    seed_database({"simulator": {
+        "n_users": 2000, "baseline_rate": 0.10, "true_effect": 0.02,
+        "covariate_correlation": 0.3, "seed": 151, "corrupted_split": None,
+    }}, database_url="sqlite:///:memory:")
+
+    def counts():
+        with engine.connect() as conn:
+            return tuple(
+                conn.execute(text(f"SELECT COUNT(*) FROM {table}")).scalar()
+                for table in ("experiment_results", "srm_checks", "analysis_reports")
+            )
+
+    def failing_report(*args, **kwargs):
+        raise RuntimeError("simulated failure while storing the report")
+
+    monkeypatch.setattr(pipeline, "persist_report", failing_report)
+    with pytest.raises(RuntimeError):
+        analyze_experiment(engine, "exp_seed151", segment_columns=["device_type"])
+    assert counts() == (0, 0, 0)
+
+    monkeypatch.undo()
+    analyze_experiment(engine, "exp_seed151")
+    after_success = counts()
+    with engine.connect() as conn:
+        computed_at = conn.execute(text("SELECT computed_at FROM analysis_reports")).scalar()
+
+    monkeypatch.setattr(pipeline, "persist_report", failing_report)
+    with pytest.raises(RuntimeError):
+        analyze_experiment(engine, "exp_seed151", segment_columns=["device_type"])
+    assert counts() == after_success
+    with engine.connect() as conn:
+        stored_at = conn.execute(text("SELECT computed_at FROM analysis_reports")).scalar()
+    assert stored_at == computed_at
