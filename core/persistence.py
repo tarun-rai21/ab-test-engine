@@ -19,16 +19,33 @@ and it is designed so that meeting cannot happen incorrectly:
 from __future__ import annotations
 
 import json
+from collections.abc import Iterator
+from contextlib import contextmanager
 from datetime import datetime, timezone
 
-from sqlalchemy import Engine, text
+from sqlalchemy import Connection, Engine, text
 
 from core.inference import InferenceResult
 from core.validity import SRMResult
 
 
+@contextmanager
+def _transaction(bind: Engine | Connection) -> Iterator[Connection]:
+    """
+    Every writer below accepts either an Engine (its own transaction, as
+    before) or an open Connection (joins the caller's transaction). The
+    pipeline passes one Connection for a whole analysis so that results,
+    the SRM row and the stored report are committed together or not at
+    all — a failure midway can no longer leave a half-written analysis.
+    """
+    if isinstance(bind, Connection):
+        yield bind
+    else:
+        with bind.begin() as conn:
+            yield conn
+
 def persist_inference_result(
-    engine: Engine,
+    engine: Engine | Connection,
     experiment_id: str,
     metric_name: str,
     inference_result: InferenceResult,
@@ -71,7 +88,7 @@ def persist_inference_result(
     )
     computed_at = datetime.now(timezone.utc).isoformat()
 
-    with engine.begin() as conn:
+    with _transaction(engine) as conn:
         conn.execute(
             text("DELETE FROM experiment_results WHERE result_id = :rid"),
             {"rid": result_id},
@@ -112,14 +129,16 @@ def persist_inference_result(
     return result_id
 
 
-def persist_srm_result(engine: Engine, experiment_id: str, srm_result: SRMResult) -> None:
+def persist_srm_result(
+    engine: Engine | Connection, experiment_id: str, srm_result: SRMResult
+) -> None:
     """
     Writes the experiment's latest SRM check to srm_checks (one row per
     experiment, replaced on re-analysis — same delete-then-insert
     idempotency as persist_inference_result). The table existed in the
     schema from Phase 0 but nothing ever wrote to it (review issue L4).
     """
-    with engine.begin() as conn:
+    with _transaction(engine) as conn:
         conn.execute(
             text("DELETE FROM srm_checks WHERE experiment_id = :eid"),
             {"eid": experiment_id},
@@ -142,7 +161,7 @@ def persist_srm_result(engine: Engine, experiment_id: str, srm_result: SRMResult
 
 
 def persist_report(
-    engine: Engine,
+    engine: Engine | Connection,
     experiment_id: str,
     metric_name: str,
     report_payload: dict,
@@ -155,7 +174,7 @@ def persist_report(
     metric). GET /experiments/{id}/report serves this row directly, so a
     report can be read back without re-running the analysis.
     """
-    with engine.begin() as conn:
+    with _transaction(engine) as conn:
         conn.execute(
             text(
                 "DELETE FROM analysis_reports "
