@@ -1,259 +1,329 @@
 # A/B Test Analysis Engine
 
-Structural enforcement of correct experimentation methodology — SRM detection,
-power analysis, CUPED variance reduction, empirical peeking-inflation
-correction, and BH-corrected segment analysis that flags effect reversals —
-validated against synthetic data with known ground truth, not asserted from
-a single run. Exposed both as a Python library, a REST API, and an
-interactive report app.
+An engine for analysing A/B tests **correctly**. You give it an experiment
+(simulated, uploaded, or sent through an API) and it produces a report that
+checks the experiment is trustworthy before estimating anything: is the
+traffic split healthy, was the test big enough, how large is the effect and
+how sure are we, did repeatedly checking the results inflate false
+positives, and does the effect differ between user segments.
 
-> **Status:** complete. A full audit and the fixes it led to are recorded
-> in [`docs/REVIEW.md`](docs/REVIEW.md) — including a miscalibrated
-> peeking correction and a cross-experiment data-mixing bug, both fixed
-> and covered by regression tests.
+Every statistical method in it is checked against simulated experiments
+where the true answer is known, and the results of those checks are
+published below.
+
+It can be used three ways: an interactive **Streamlit** report app, a
+**REST API** (FastAPI), or as a **Python library**.
+
+---
+
+## Why this exists
+
+The common way to read an A/B test ("treatment beat control, p < 0.05, ship
+it") goes wrong in four well-known ways:
+
+| Problem | What happens | What this engine does |
+|---|---|---|
+| **Broken randomization** (sample ratio mismatch) | A bug sends users to the variants in the wrong proportions, and every number downstream is quietly invalid. | Runs a chi-square SRM check first and marks the report untrusted if it fails. |
+| **Underpowered tests** | A "no difference" result from a test too small to detect anything is read as proof of no effect. | Reports the smallest effect the test could reliably have detected. |
+| **Peeking** | Checking results every day and stopping at the first p < 0.05 makes the real false-positive rate several times the advertised 5% (about 20% with 10 looks). | Corrects the threshold for every look with a group-sequential boundary (Lan-DeMets), so the overall rate stays at 5%. |
+| **Hidden segment differences** | An average effect can hide a segment where the treatment does harm. | Breaks results down by segment, corrects for testing many segments, tests whether segment effects differ, and flags segments where the effect reverses. |
+
+---
 
 ## Quick start
 
+Requires Python 3.11+. Everything runs locally with SQLite; no external
+services.
+
 ```bash
-git clone <repo_url>
+git clone https://github.com/tarun-rai21/ab-test-engine.git
 cd ab-test-engine
-python -m venv venv && source venv/bin/activate   # Windows: venv\Scripts\activate
-pip install -r requirements-dev.txt   # runtime + test/lint tools
-pytest -m "not slow"
+python -m venv venv
+source venv/bin/activate            # Windows: venv\Scripts\activate
+pip install -r requirements-dev.txt # requirements.txt alone is enough to run, not test
 ```
 
-Runs in under 10 seconds and requires zero external services — SQLite only,
-per NFR5.
+**Open the report app** — the quickest way to see what it does:
 
-**Try the interactive report app:**
 ```bash
 streamlit run app/streamlit_app.py
 ```
 
-**Try the API** (auto-generated interactive docs at `/docs`):
+Click **Generate data** (a simulated experiment with a known true effect),
+then **Run analysis**. Try ticking *Simulate a broken randomization* to see
+the SRM warning, adding a second treatment arm, choosing a revenue metric,
+selecting segments, or enabling the peeking check and logging a few
+checkpoints. You can also upload your own CSV (see [Using your own
+data](#using-your-own-data)).
+
+**Start the API** — interactive documentation at http://localhost:8000/docs:
+
 ```bash
 uvicorn api.main:app --reload
 ```
 
-**Run the full validation suite** (release-gate evidence, not a per-commit
-check — several minutes):
+**Run the tests:**
+
 ```bash
-pytest validation/ -v -s -m slow --tb=short
+pytest -m "not slow"                       # ~240 fast tests, about a minute
+pytest validation/ -m slow -v -s           # simulation-based validation, ~12 minutes
 ```
 
-## Optional authentication
+---
 
-Both services are open by default for local use. To require credentials,
-set environment variables before starting them:
+## What a report contains
 
-- `API_KEY` — every data endpoint then requires the same value in an
-  `X-API-Key` header (`/` and `/health` stay open). `GET /health` returns
-  200 only when the database answers a query.
-- `APP_PASSWORD` — the Streamlit app asks for it once per browser session.
+1. **Validity** — the SRM check (observed vs. intended split) and the
+   smallest effect the sample size could detect.
+2. **Effect estimate** — the treatment-minus-control difference with a 95%
+   confidence interval and p-value, both raw and CUPED-adjusted (CUPED uses
+   each user's pre-experiment behaviour to remove noise, giving a narrower
+   interval for the same effect). With several treatment arms, one row per
+   arm with p-values adjusted for comparing many arms.
+3. **Peeking risk** — for each arm, whether the latest look is significant
+   at the naive 0.05 and at the corrected threshold. "Significant naively,
+   not after correction" is the classic peeking false positive.
+4. **Segments** — per-segment effects (e.g. mobile vs. desktop), a
+   Benjamini-Hochberg correction across every segment tested, a test of
+   whether the segment effects differ at all, and a flag for segments whose
+   effect significantly reverses the overall result.
 
-## Why this exists
+### Metrics
 
-Naive `p < 0.05` A/B testing fails in four specific, well-documented ways:
+| Metric | Meaning | Method |
+|---|---|---|
+| `conversion` | Share of users who converted | Welch's t-test |
+| `revenue_per_user` | Mean revenue per user (0 for non-buyers) | Welch's t-test, optional winsorization of extreme values |
+| `revenue_per_conversion` | Average order value — a ratio of two random quantities | Delta method at the user level |
 
-- **Underpowered or over-run tests** — no pre-registered sample size means
-  teams either stop too early or run indefinitely past the point of value.
-- **Peeking / repeated significance testing** — checking a dashboard daily
-  and stopping the moment `p < 0.05` appears inflates the true false-positive
-  rate far above the nominal 5%, invisibly.
-- **Sample ratio mismatch (SRM)** — a broken randomization pipeline can
-  silently invalidate every downstream statistic.
-- **Effect heterogeneity** — an aggregate result can mask
-  a strong effect in one segment and the opposite effect in another.
+CUPED applies to all three.
 
-This engine makes the relevant checks mandatory and ordered, computes what
-naive workflows skip (power, SRM, CI, calibrated peeking correction,
-segment-level heterogeneity), and proves its own claims against synthetic
-data with a known ground-truth effect — every validation number below was
-measured by actually running the code, not asserted from theory.
+---
 
-## Architecture
+## Using the API
+
+A typical session with simulated data: create an experiment, fill it,
+record a look, analyse it, read the stored report. (Real data is loaded
+with `/ingest` instead of `/assign` — see [Using your own
+data](#using-your-own-data).)
+
+```bash
+# 1. Create an experiment with three variants and a planned monitoring schedule
+curl -X POST localhost:8000/experiments -H "Content-Type: application/json" -d '{
+  "name": "New checkout",
+  "variants": [
+    {"name": "control", "split_pct": 0.5},
+    {"name": "treatment", "split_pct": 0.25},
+    {"name": "treatment_b", "split_pct": 0.25}
+  ],
+  "schedule": {"n_checkpoints_planned": 4, "checkpoint_n": 2000}
+}'
+# -> {"experiment_id": "exp_1a2b3c4d5e6f", "status": "created"}
+
+# 2. Fill it with 8000 simulated users (treatment has a true +0.03 effect)
+curl -X POST localhost:8000/experiments/exp_1a2b3c4d5e6f/assign -H "Content-Type: application/json" \
+  -d '{"n_users": 8000, "baseline_rate": 0.10, "arm_effects": {"treatment": 0.03}}'
+
+# 3. Record a "look" (each arm's current p-value) for peeking-risk monitoring
+curl -X POST localhost:8000/experiments/exp_1a2b3c4d5e6f/checkpoints -H "Content-Type: application/json" \
+  -d '{"metric": "conversion"}'
+
+# 4. Analyse (the full report is stored), then read it back without recomputing
+curl -X POST localhost:8000/experiments/exp_1a2b3c4d5e6f/analyze -H "Content-Type: application/json" \
+  -d '{"metric": "conversion", "segment_columns": ["device_type"]}'
+curl localhost:8000/experiments/exp_1a2b3c4d5e6f/report?metric=conversion
+```
+
+| Endpoint | Purpose |
+|---|---|
+| `POST /experiments` | Create an experiment (variants, intended split, optional schedule) |
+| `PUT /experiments/{id}/schedule` | Set or change the planned monitoring schedule |
+| `POST /experiments/{id}/assign` | Generate simulated data |
+| `POST /experiments/{id}/ingest` | Load real data |
+| `POST /experiments/{id}/checkpoints` | Record a look for peeking-risk monitoring |
+| `POST /experiments/{id}/analyze` | Run and store the full analysis |
+| `GET /experiments/{id}/report` | Read the stored report |
+| `GET /health` | Health check (database reachable) |
+
+## Using it as a Python library
+
+```python
+from core.pipeline import analyze_experiment
+from db.connection import create_memory_engine
+from db.seed import seed_database
+
+engine = create_memory_engine()
+seed_database({"simulator": {
+    "n_users": 20000, "baseline_rate": 0.10, "true_effect": 0.02,
+    "covariate_correlation": 0.5, "seed": 7,
+}}, engine=engine)
+
+report = analyze_experiment(engine, "exp_seed7", segment_columns=["device_type"])
+print(report.srm.flagged)                        # False: the split is healthy
+print(report.cuped_effect.point_estimate)        # close to the true +0.02
+print(report.cuped_effect.ci_lower, report.cuped_effect.ci_upper)
+```
+
+## Using your own data
+
+Data must be **one row per user**. Column names and variant labels can be
+anything; you map them:
+
+| Role | Required? | Example values |
+|---|---|---|
+| variant | yes | `A` / `B` / `QA` — mapped to `control`, `treatment`, `treatment_b`, … or dropped |
+| converted | yes, unless revenue is given | `1`/`0`, `true`/`false`, `yes`/`no` |
+| revenue | for revenue metrics | `42.50` (0 for users who didn't buy) |
+| user id | no | `u123` |
+| pre-period covariate | for CUPED | e.g. spend in the 30 days before the test |
+| device type, region, existing customer | for segment analysis | `mobile`, `EU`, `true` |
+
+The Streamlit upload has a mapping step for this. The API takes the same
+mapping, with one JSON object per user — here a spreadsheet whose `group`
+column holds `A`/`B`/`QA` and whose `bought` column holds yes/no:
+
+```bash
+curl -X POST localhost:8000/experiments/<experiment_id>/ingest -H "Content-Type: application/json" -d '{
+  "rows": [
+    {"user": "u1", "group": "A", "bought": "yes", "spend": 42.5},
+    {"user": "u2", "group": "B", "bought": "no",  "spend": 0},
+    {"user": "u3", "group": "QA", "bought": "no", "spend": 0}
+  ],
+  "columns": {"variant": "group", "converted": "bought", "revenue": "spend", "user_id": "user"},
+  "variant_values": {"A": "control", "B": "treatment", "QA": null}
+}'
+```
+
+Rows mapped to `null` (here, QA traffic) are dropped, and the variant names
+must match the experiment's variants. A file that already uses the names
+`variant_id` (values ending in `_control` / `_treatment`) and `converted`
+needs no mapping.
+
+---
+
+## How it works
 
 ```mermaid
-flowchart TB
-    SIM["Data Simulator<br/>data_sim/simulator.py"]
-    GT["GroundTruth<br/>data_sim/ground_truth.py"]
-    DB[("SQLite / Postgres<br/>db/schema.sql")]
-    SIM --> GT
-    SIM -->|seed_database| DB
-
-    DATAACCESS["Data Access Layer<br/>core/data_access.py"]
-    DB --> DATAACCESS
-
-    VALIDITY["Validity Checker<br/>core/validity.py"]
-    INFERENCE["Statistical Core<br/>core/inference.py"]
-    SEQUENTIAL["Sequential Engine<br/>core/sequential.py"]
-    SEGMENTS["Segment Analysis<br/>core/segments.py"]
-
-    DATAACCESS --> VALIDITY
-    DATAACCESS --> INFERENCE
-    DATAACCESS --> SEQUENTIAL
-    DATAACCESS --> SEGMENTS
-
-    PIPELINE["Orchestration Layer<br/>core/pipeline.py"]
-    VALIDITY --> PIPELINE
-    INFERENCE --> PIPELINE
-    SEQUENTIAL --> PIPELINE
-    SEGMENTS --> PIPELINE
-
-    PERSIST["Persistence<br/>core/persistence.py"]
-    PIPELINE --> PERSIST
-    PERSIST --> DB
-
-    VALIDATION["Validation Harness<br/>validation/*.py"]
-    GT -.-> VALIDATION
-    PIPELINE -.-> VALIDATION
-
-    API["FastAPI Service<br/>api/main.py"]
-    APP["Streamlit App<br/>app/streamlit_app.py"]
-    PIPELINE --> API
-    PIPELINE --> APP
+flowchart LR
+    SIM["Simulator<br/>data_sim/"] --> DB[("SQLite<br/>db/schema.sql")]
+    CSV["CSV upload / API rows<br/>core/ingestion.py"] --> DB
+    DB --> DA["core/data_access.py<br/>(all SQL)"]
+    DA --> PIPE["core/pipeline.py<br/>analyze_experiment()"]
+    PIPE --> V["validity.py<br/>SRM, power"]
+    PIPE --> M["metrics.py + inference.py<br/>effects, CUPED, delta method"]
+    PIPE --> MT["multiple_testing.py<br/>Dunnett / Holm"]
+    PIPE --> SQ["sequential.py + monitoring.py<br/>peeking correction"]
+    PIPE --> SG["segments.py<br/>BH, heterogeneity"]
+    PIPE --> P["persistence.py<br/>stores results + report"]
+    P --> DB
+    PIPE --> API["FastAPI<br/>api/"]
+    PIPE --> APP["Streamlit<br/>app/"]
 ```
 
-The dashed box (Core Engine) is deliberate: each of its four modules is pure,
-independently testable, and has zero awareness of the others except where
-the spec explicitly calls for reuse (`core/segments.py` reuses
-`core/inference.py`'s `raw_ttest_ci()` directly, mirroring the pooled
-estimate). `core/persistence.py` is the *only* place validity and inference
-results are allowed to meet, and it's structured so that meeting cannot
-happen incorrectly — `trusted` is computed from the SRM result internally,
-never accepted as a caller-supplied argument.
+`analyze_experiment()` runs the steps in a fixed order: SRM check → achievable
+effect size → effect per arm (raw and CUPED) with multiple-arm adjustment →
+peeking check per arm → segment analysis → store everything in one
+transaction. Two design rules keep it trustworthy:
 
-**API and Streamlit both call `core/pipeline.py` directly**, not each other
-— a deliberate choice (documented in `app/streamlit_app.py`) favoring
-simplicity for a local demo tool over an unnecessary HTTP round-trip.
+- **Validity is checked before inference**, and a result can only be marked
+  `trusted` from the SRM result itself — never by the caller.
+- **The statistical modules are pure functions** with no database access, so
+  each is tested on its own against known answers. Only `data_access.py`
+  contains SQL.
 
-## Project structure
+### Project structure
 
 ```
 ab-test-engine/
-├── core/
-│   ├── validity.py       # SRM chi-square check, power/MDE calculator
-│   ├── inference.py      # Welch's t-test, CUPED adjustment, variance reduction
-│   ├── sequential.py     # peeking-FPR simulation, O'Brien-Fleming + Lan-DeMets boundaries
-│   ├── segments.py       # per-segment effects, BH correction, effect-reversal flag
-│   ├── persistence.py    # the only writer of experiment_results.trusted
-│   ├── data_access.py    # the only file with raw SQL
-│   └── pipeline.py       # orchestration: ties the above into one report
-├── data_sim/
-│   ├── simulator.py      # ExperimentSimulator — synthetic data, known ground truth
-│   └── ground_truth.py   # immutable record of configured-vs-realized parameters
-├── db/
-│   ├── schema.sql
-│   ├── connection.py
-│   └── seed.py           # seed_database() + seed_assignments_for_existing_experiment()
-├── api/
-│   ├── main.py            # FastAPI app, auto-docs at /docs
-│   ├── schemas.py          # Pydantic request/response models
-│   └── routers/
-│       ├── experiments.py  # POST /experiments, POST /experiments/{id}/assign
-│       └── analysis.py     # POST /experiments/{id}/analyze, GET /experiments/{id}/report
-├── app/
-│   ├── streamlit_app.py    # single-page report entrypoint
-│   └── components/         # 5 panels: upload_or_generate, validity, effect, sequential, segment
-├── tests/                # fast, closed-form/structural tests (pytest -m "not slow")
-├── validation/           # slow, simulation-based proof (release gate, not per-commit)
-├── notebooks/            # narrative walkthrough (regenerate: python generate_notebook.py)
-├── config/
-└── scripts/
+├── core/                    # the engine
+│   ├── pipeline.py          # analyze_experiment(): runs every step, builds the report
+│   ├── validity.py          # SRM check, sample size / minimum detectable effect
+│   ├── inference.py         # Welch's t-test, CUPED, delta method
+│   ├── metrics.py           # which metric means what, and how it is estimated
+│   ├── multiple_testing.py  # Dunnett and Holm adjustments for multiple arms
+│   ├── sequential.py        # peeking correction (O'Brien-Fleming, Lan-DeMets)
+│   ├── monitoring.py        # recording looks at a live experiment
+│   ├── segments.py          # segment effects, BH correction, heterogeneity test
+│   ├── ingestion.py         # mapping real data onto the schema
+│   ├── persistence.py       # writing results and reports
+│   └── data_access.py       # all SQL queries
+├── data_sim/                # simulator with known ground truth
+├── db/                      # schema, connection, seeding
+├── api/                     # FastAPI service (routers, schemas, optional API key)
+├── app/                     # Streamlit report app and its panels
+├── tests/                   # fast tests, run in CI
+├── validation/              # slow simulation-based validation + results report
+├── notebooks/writeup.ipynb  # executed walkthrough of every feature
+├── docs/REVIEW.md           # full code audit and the record of every fix
+└── config/default_config.yaml  # default simulator settings for python -m db.seed
 ```
+
+### Statistical methods and why
+
+| Method | Used for | Why this choice |
+|---|---|---|
+| Chi-square goodness of fit, flag at p < 0.001 | SRM | Run on every analysis, so a strict threshold avoids false alarms; real SRM bugs are large. |
+| Welch's t-test | Effects | Does not assume treatment leaves the variance unchanged. |
+| CUPED | Variance reduction | Removes noise explained by pre-experiment behaviour without changing what is measured; reduction ≈ 100·ρ². |
+| Delta method | Ratio metric | Keeps the user as the unit; treating each order as independent would understate uncertainty. |
+| Step-down Dunnett | Several arms vs. one control | Controls the chance of any false winner; uses the correlation from the shared control, so less conservative than Holm. |
+| Lan-DeMets spending (O'Brien-Fleming type) | Peeking | Keeps the overall false-positive rate at 5% for any timing of looks, and supports changing the planned sample size mid-test. |
+| Benjamini-Hochberg | Segments | Controls the share of false discoveries across many exploratory segment tests. |
+| Cochran's Q | Segments | Tests whether segment effects actually differ, which per-segment significance cannot show. |
+
+---
 
 ## Validation evidence
 
-Measured by actually running `validation/*.py`, not asserted — see
-`validation/validation_report.md` for the full writeup.
+Each claim is checked by simulating many experiments where the true effect
+is known (`validation/`, details in
+[`validation/validation_report.md`](validation/validation_report.md)).
+All numbers below come from running that suite.
 
-| Claim | Target | Measured | Notes |
-|---|---|---|---|
-| CI coverage (n=2000, baseline=0.10) | 93%–97% | **94.4%** | Original configuration, 1000 sims. |
-| CI coverage (small n=400) | 93%–97% | **94.4%** | Stress-tests Welch's df approximation at smaller n. |
-| CI coverage (low baseline=0.02) | 93%–97% | **95.0%** | Stress-tests skew near the probability boundary. |
-| CI coverage (high baseline=0.90) | 93%–97% | **95.4%** | Symmetric boundary stress test. |
-| CUPED variance reduction @ ρ=0.3, null effect | ≈9.0% | **9.21%** | 200 sims, n=5000/arm. |
-| CUPED variance reduction @ ρ=0.7, null effect | ≈49.0% | **48.67%** | Same config. |
-| CUPED variance reduction, nonzero true effect | ≈25.0% | **23.87%** | Real, documented ~1pp systematic shift from effect-application mechanics — see validation file docstring. |
-| CUPED variance reduction, continuous metric | ≈36.0% | **35.94%** | Proves the identity is metric-agnostic, not binary-only. |
-| Naive peeking empirical FPR | ~19.3% (theory) | **19.95%** (399/2000) | 10 checkpoints × 200/arm, flat α=0.05. |
-| O'Brien-Fleming corrected FPR | 5% (band 3.5%–7%) | **5.15%** (103/2000) | Calibrated constant c=2.0865; identical data (common random numbers). |
-| Corrected FPR under irregular checkpoint spacing | Must beat naive | **4.80%** vs naive **20.45%** | Uneven daily-style spacing; no meaningful degradation vs. even spacing. |
-| Lan-DeMets FPR, equal spacing | 5% (band 3.5%–7%) | **5.25%** (105/2000) | Information-based boundary — the default for live experiments. |
-| Lan-DeMets FPR, irregular spacing | 5% (band 3.5%–7%) | **5.05%** (101/2000) | Calibrated to each look's actual information fraction, not assumed to be equal. |
-| Revenue per conversion CI coverage (delta method) | 93%–97% | **94.8%** (474/500) | Log-normal order values (σ=1), n=4000. |
-| Revenue per user CI coverage | 93%–97% | **95.2%** (476/500) | Same heavy-tailed order values. |
-| Revenue per conversion CI coverage, CUPED | 93%–97% | **95.4%** (477/500) | Order values tied to the covariate; 6.4% mean variance reduction. |
-| Multi-arm family-wise error (3 null arms) | ≤5% | **4.75%** Dunnett, **4.45%** Holm, **13.05%** unadjusted | 2000 sims, shared control. |
-| Segment heterogeneity (Q test), homogeneous effect | ~5% | **4.60%** | 1000 sims, region segments. |
-| Segment heterogeneity (Q test), real difference | ~87% (theory) | **88.5%** | 200 sims, device-type effects ±0.04. |
-| Segment recovery (deliberately heterogeneous) | Correct sign, magnitude within noise | **Mobile: +0.147** (configured +0.15); **Desktop: -0.070** (configured -0.08) | Effect-reversal flag correctly fired on the significantly opposite segment. |
+| Claim | Target | Measured |
+|---|---|---|
+| 95% confidence intervals contain the true effect | 93%–97% | 94.4%–95.4% across 4 configurations |
+| CUPED variance reduction matches theory (ρ = 0.3 / 0.7) | 9% / 49% | 9.21% / 48.67% |
+| Revenue metric intervals (heavy-tailed order values) | 93%–97% | 94.8% per conversion, 95.2% per user, 95.4% per conversion with CUPED |
+| False-positive rate when peeking 10 times, uncorrected | ~19% (theory) | 19.95% |
+| …with the O'Brien-Fleming correction | 5% | 5.15% (4.80% with irregular look times) |
+| …with the Lan-DeMets correction | 5% | 5.25% equal spacing, 5.05% irregular |
+| Chance of a false winner among 3 null arms | ≤ 5% | 4.75% Dunnett, 4.45% Holm (13.05% uncorrected) |
+| Heterogeneity test false alarms / detection | 5% / ~87% | 4.60% / 88.5% |
+| Recovering a deliberately reversed segment effect | correct sign and size | mobile +0.147 (true +0.15), desktop −0.070 (true −0.08), reversal flagged |
 
-The naive→corrected trigger-position shift (naive triggers front-loaded at
-early checkpoints; corrected triggers essentially never at the first looks
-and concentrated late) is direct evidence the correction targets the
-intended failure mode — early-look noise — not just a uniform threshold
-reduction.
+---
 
-An earlier version of the boundary used c = 1.96 instead of a calibrated
-constant; its exact false-positive rate is ~6.9%, and it measured 6.6% at
-500 simulations. See `docs/REVIEW.md` (issue H2) for how this was found
-and fixed.
+## Configuration
 
-## Capabilities beyond a two-arm conversion test
+| Environment variable | Effect |
+|---|---|
+| `DATABASE_URL` | Database for the API and scripts (default `sqlite:///local.db`). The Streamlit app always uses a private in-memory database per browser session. |
+| `API_KEY` | If set, every data endpoint requires it in an `X-API-Key` header (`/` and `/health` stay open). |
+| `APP_PASSWORD` | If set, the Streamlit app asks for it once per browser session. |
 
-- **Metrics:** `conversion` (Welch t-test), `revenue_per_user` (Welch,
-  optional winsorization at a pooled quantile, CUPED-eligible) and
-  `revenue_per_conversion` (average order value — a ratio metric, analysed
-  with the delta method at the user level, with CUPED applied to its
-  per-user linearization). Select with
-  `analyze_experiment(metric_name=...)` or the API's `metric` field.
-- **A/B/n experiments:** any number of treatment arms. Each arm is compared
-  with control; step-down Dunnett-adjusted p-values (built from each
-  comparison's own standard error and the shared-control correlation)
-  control the family-wise error rate across arms, with Holm as an option
-  (`multiple_comparison=`, `AnalysisReport.comparisons`).
-- **Segment heterogeneity:** Cochran's Q test of whether segment effects
-  differ, and one Benjamini-Hochberg correction across every segment, column
-  and arm in a report.
-- **Stored schedules and reports:** the planned checkpoint schedule lives on
-  the experiment (`PUT /experiments/{id}/schedule`), and `GET /report`
-  serves the stored result of the latest `POST /analyze` without
-  recomputation.
-- **Real data:** `POST /experiments/{id}/ingest` (JSON rows) and the
-  Streamlit CSV upload share `core/ingestion.py`: map the file's own column
-  names onto variant / converted / revenue / user id / covariate / segment
-  roles, map raw variant labels (e.g. "A"/"B") onto control and arms or
-  drop them, and read conversion flags written as 0/1, true/false or
-  yes/no.
-- **Sequential monitoring per arm and metric:** each look
-  (`POST /experiments/{id}/checkpoints`, or the app's "Log this checkpoint")
-  is recorded for every treatment arm on a given metric, and the peeking
-  check runs per arm (`AnalysisReport.sequential_risks`). The planned sample
-  size can change mid-test: thresholds already used keep their recorded
-  values and the alpha they spent is carried forward under the new plan.
+`python -m db.seed` fills `local.db` with a demo experiment using
+`config/default_config.yaml`.
 
-## Known limitations (stated directly, not discovered later)
+## Limitations
 
-- Live peeking checks use a **Lan-DeMets** boundary (O'Brien-Fleming-type
-  spending, α(t) = 4 − 4Φ(z_{α/4}/√t)) driven by each look's information
-  fraction, so irregular look times are handled exactly. It matches
-  published `ldbounds` values to ~0.001 in z. A look past the planned
-  total spends nothing (it cannot reject) until the plan is increased; plan
-  changes must not be driven by the observed effect, or the error guarantee
-  no longer holds. The index-based O'Brien-Fleming schedule remains
-  available (`spending="obrien_fleming"`) for planned equal spacing.
-- The multi-arm Dunnett adjustment uses the large-sample normal
-  approximation for the joint distribution of the comparisons. The
-  sequential check corrects for repeated looks within each arm, not jointly
-  across arms.
-- The Cochran's Q heterogeneity test has low power with few or small
-  segments; a large p-value is not evidence that effects are equal.
-- No deployment setup is included. Authentication is one shared API key
-  (not per-user accounts), with no TLS or rate limiting. `DATABASE_URL` can
-  point at Postgres, but the driver is not in `requirements.txt` and the
-  schema is only tested on SQLite.
-- Real data must arrive as one row per user (variant, conversion and
-  optional revenue, covariate and segments); event-level logs need
-  aggregating to users first.
+- Data must be one row per user; event-level logs need aggregating first.
+- The peeking correction controls false positives within each arm, not
+  jointly across arms. Changes to the planned sample size must not be
+  driven by the results seen so far.
+- The Dunnett adjustment uses a large-sample normal approximation.
+- The heterogeneity test has low power with few or small segments; a large
+  p-value is not evidence that segment effects are equal.
+- No deployment setup is included. Authentication is a single shared API
+  key with no TLS or rate limiting. Only SQLite is tested.
+
+## Further reading
+
+- [`notebooks/writeup.ipynb`](notebooks/writeup.ipynb) — an executed
+  walkthrough of every feature on simulated data.
+- [`validation/validation_report.md`](validation/validation_report.md) — the
+  validation setup and results in detail.
+- [`docs/REVIEW.md`](docs/REVIEW.md) — a full audit of an earlier version
+  and the record of every fix since (including a peeking correction that
+  allowed ~7% false positives and a bug that mixed data between
+  experiments).
