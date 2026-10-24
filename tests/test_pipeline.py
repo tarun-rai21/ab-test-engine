@@ -667,4 +667,5 @@ def test_failed_analysis_writes_nothing_and_keeps_previous_results(isolated_db, 
         analyze_experiment(engine, "exp_seed151", segment_columns=["device_type"])
     assert counts() == after_success
     with engine.connect() as conn:
-        assert conn.execute(text("SELECT computed_at FROM analysis_reports")).scalar() == computed_at
+        stored_at = conn.execute(text("SELECT computed_at FROM analysis_reports")).scalar()
+    assert stored_at == computed_at

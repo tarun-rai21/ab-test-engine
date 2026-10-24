@@ -24,8 +24,7 @@ import numpy as np
 from scipy.optimize import brentq
 from scipy.signal import fftconvolve
 from scipy.stats import norm
-
-from core.inference import raw_ttest_ci
+from scipy.stats import t as t_dist
 
 
 @dataclass(frozen=True)
@@ -321,29 +320,26 @@ def simulate_peeking_fpr(
 
     rng = np.random.default_rng(seed)
 
-    triggered_count = 0
-    trigger_checkpoint_counts = [0] * n_checkpoints
-
+    # Draw every simulation's data first, in exactly the same order as the
+    # original per-simulation loop (control then treatment, per sim), so a
+    # given seed reproduces the same experiments.
+    control = np.empty((n_simulations, total_n))
+    treatment = np.empty((n_simulations, total_n))
     for sim_idx in range(n_simulations):
-        control = rng.binomial(1, baseline_rate, total_n).astype(float)
-        treatment = rng.binomial(1, baseline_rate, total_n).astype(float)
+        control[sim_idx] = rng.binomial(1, baseline_rate, total_n)
+        treatment[sim_idx] = rng.binomial(1, baseline_rate, total_n)
 
-        triggered_this_sim = False
-        for checkpoint_idx in range(n_checkpoints):
-            cumulative_n = cumulative_sizes[checkpoint_idx]
-            control_slice = control[:cumulative_n]
-            treatment_slice = treatment[:cumulative_n]
+    p_values = _welch_p_values_at_checkpoints(control, treatment, cumulative_sizes)
+    thresholds = np.asarray(threshold_schedule, dtype=float)
 
-            threshold = threshold_schedule[checkpoint_idx]
-            result = raw_ttest_ci(control_slice, treatment_slice, alpha=threshold)
-
-            if result.p_value < threshold:
-                triggered_this_sim = True
-                trigger_checkpoint_counts[checkpoint_idx] += 1
-                break
-
-        if triggered_this_sim:
-            triggered_count += 1
+    # A simulation stops at its FIRST crossing; count where that happens.
+    crossed = p_values < thresholds  # shape (n_simulations, n_checkpoints)
+    triggered = crossed.any(axis=1)
+    first_crossing = crossed.argmax(axis=1)
+    triggered_count = int(triggered.sum())
+    trigger_checkpoint_counts = np.bincount(
+        first_crossing[triggered], minlength=n_checkpoints
+    ).tolist()
 
     empirical_fpr = triggered_count / n_simulations
 
@@ -354,6 +350,38 @@ def simulate_peeking_fpr(
         empirical_fpr=empirical_fpr,
         checkpoint_trigger_counts=tuple(trigger_checkpoint_counts),
     )
+
+
+def _welch_p_values_at_checkpoints(
+    control: np.ndarray, treatment: np.ndarray, cumulative_sizes: list[int]
+) -> np.ndarray:
+    """
+    Welch t-test p-values for every simulation (rows) at every checkpoint
+    (columns), computed together from cumulative sums of 0/1 outcomes —
+    the same statistic as core.inference.raw_ttest_ci() (equal n per arm at
+    each checkpoint, sample variance with ddof=1, Welch-Satterthwaite df),
+    without one scipy call per test. This made the 2000-simulation
+    validation runs several times faster.
+
+    For 0/1 data with s successes in n draws, the ddof=1 sample variance is
+    (s - s^2/n) / (n - 1). A checkpoint where both arms are constant (zero
+    standard error) gets p = 1: no evidence, never a trigger (raw_ttest_ci
+    would raise instead).
+    """
+    n = np.asarray(cumulative_sizes, dtype=float)
+    idx = np.asarray(cumulative_sizes) - 1
+    s_c = np.cumsum(control, axis=1)[:, idx]
+    s_t = np.cumsum(treatment, axis=1)[:, idx]
+
+    var_c = (s_c - s_c**2 / n) / (n - 1)
+    var_t = (s_t - s_t**2 / n) / (n - 1)
+    se_sq = var_c / n + var_t / n
+
+    with np.errstate(divide="ignore", invalid="ignore"):
+        t_stat = (s_t / n - s_c / n) / np.sqrt(se_sq)
+        df = se_sq**2 / ((var_c / n) ** 2 / (n - 1) + (var_t / n) ** 2 / (n - 1))
+        p = 2 * t_dist.sf(np.abs(t_stat), df)
+    return np.where(se_sq > 0, p, 1.0)
 
 
 def sequential_check(
