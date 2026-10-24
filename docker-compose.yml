@@ -1,0 +1,43 @@
+# docker compose up --build
+#   API:       http://localhost:8000  (interactive docs at /docs)
+#   Streamlit: http://localhost:8501
+# Set API_KEY / APP_PASSWORD in a .env file (see .env.example) to require
+# them; left empty, both services are open (local use only).
+services:
+  api:
+    build: .
+    ports:
+      - "8000:8000"
+    environment:
+      API_KEY: ${API_KEY:-}
+      DATABASE_URL: sqlite:////data/ab_test_engine.db
+    volumes:
+      - ab-data:/data
+    restart: unless-stopped
+
+  app:
+    build: .
+    command:
+      - streamlit
+      - run
+      - app/streamlit_app.py
+      - --server.address=0.0.0.0
+      - --server.port=8501
+      - --server.headless=true
+    ports:
+      - "8501:8501"
+    environment:
+      APP_PASSWORD: ${APP_PASSWORD:-}
+    # The Streamlit app keeps one in-memory database per browser session by
+    # design, so it does not need the API's volume. Its health check
+    # targets Streamlit's own endpoint rather than the API's /health.
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8501/_stcore/health', timeout=4)"]
+      interval: 30s
+      timeout: 5s
+      start_period: 20s
+      retries: 3
+    restart: unless-stopped
+
+volumes:
+  ab-data:

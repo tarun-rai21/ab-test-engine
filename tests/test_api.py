@@ -388,3 +388,23 @@ def test_persisted_results_include_test_statistics(client):
     assert row.p_value == pytest.approx(raw["p_value"])
     assert row.standard_error == pytest.approx(raw["standard_error"])
     assert row.n_control + row.n_treatment == raw["n_control"] + raw["n_treatment"]
+
+
+def test_api_key_is_required_when_configured(client, monkeypatch):
+    """With API_KEY set, data endpoints need a matching X-API-Key header;
+    '/' and '/health' stay open."""
+    monkeypatch.setenv("API_KEY", "s3cret-key")
+
+    assert client.post("/experiments", json={"name": "x"}).status_code == 401
+    wrong = client.post("/experiments", json={"name": "x"}, headers={"X-API-Key": "nope"})
+    assert wrong.status_code == 401
+    ok = client.post("/experiments", json={"name": "x"}, headers={"X-API-Key": "s3cret-key"})
+    assert ok.status_code == 200
+
+    assert client.get("/").status_code == 200
+    assert client.get("/health").json() == {"status": "ok", "database": "ok"}
+
+
+def test_api_is_open_when_no_key_is_configured(client, monkeypatch):
+    monkeypatch.delenv("API_KEY", raising=False)
+    assert client.post("/experiments", json={"name": "x"}).status_code == 200

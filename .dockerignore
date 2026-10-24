@@ -1,0 +1,17 @@
+.git
+.github
+.idea
+.vscode
+venv/
+.venv/
+env/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+local.db
+*.db
+*.sqlite3
+.env
+notebooks/
+validation/

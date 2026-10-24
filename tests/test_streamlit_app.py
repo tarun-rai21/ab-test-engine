@@ -143,3 +143,16 @@ def test_column_mapping_widgets_guess_roles_and_variant_meanings():
     assert columns == {"variant": "bucket", "converted": "purchased",
                        "revenue": "spend", "user_id": "customer"}
     assert variant_values == {"A": "control", "B": "treatment"}
+
+
+def test_password_gate_when_app_password_is_set(monkeypatch):
+    monkeypatch.setenv("APP_PASSWORD", "let-me-in")
+    at = AppTest.from_file(APP_PATH, default_timeout=TIMEOUT)
+    at.run()
+    assert not at.button  # nothing usable before signing in
+
+    at.text_input[0].input("wrong").run()
+    assert any("Incorrect password" in e.value for e in at.error)
+
+    at.text_input[0].input("let-me-in").run()
+    assert any(b.label == "Generate data" for b in at.button)

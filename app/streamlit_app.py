@@ -16,6 +16,8 @@ separate, independently-proven piece of this project either way.
 
 from __future__ import annotations
 
+import hmac
+import os
 import sys
 from pathlib import Path
 
@@ -45,6 +47,18 @@ st.caption(
     "SRM detection, CUPED variance reduction, peeking correction, and "
     "effect-reversal-aware segment analysis."
 )
+
+# Optional password gate for a deployed app: set APP_PASSWORD to require
+# it once per browser session; unset (local use), the app is open.
+_app_password = os.environ.get("APP_PASSWORD")
+if _app_password and not st.session_state.get("authenticated"):
+    entered = st.text_input("Password", type="password")
+    if entered and hmac.compare_digest(entered.encode(), _app_password.encode()):
+        st.session_state["authenticated"] = True
+        st.rerun()
+    if entered:
+        st.error("Incorrect password.")
+    st.stop()
 
 # --------------------------------------------------------------------- #
 # 1. Data input

@@ -41,6 +41,20 @@ check — several minutes):
 pytest validation/ -v -s -m slow --tb=short
 ```
 
+## Running with Docker
+
+```bash
+cp .env.example .env          # optionally set API_KEY and APP_PASSWORD
+docker compose up --build
+```
+
+- API on http://localhost:8000 (docs at `/docs`, health at `/health`).
+  With `API_KEY` set, every data endpoint requires an `X-API-Key` header.
+- Streamlit on http://localhost:8501. With `APP_PASSWORD` set, it asks for
+  the password once per browser session.
+- The API's SQLite database lives in the `ab-data` volume. Both containers
+  run as an unprivileged user.
+
 ## Why this exists
 
 Naive `p < 0.05` A/B testing fails in four specific, well-documented ways:
@@ -240,6 +254,11 @@ and fixed.
   across arms.
 - The Cochran's Q heterogeneity test has low power with few or small
   segments; a large p-value is not evidence that effects are equal.
+- Deployment is a single-node setup: SQLite in a volume, one API key
+  rather than per-user accounts, and no TLS termination or rate limiting
+  (put it behind a reverse proxy for that). `DATABASE_URL` can point at
+  Postgres, but the driver is not in `requirements.txt` and the schema is
+  only tested on SQLite.
 - Real data must arrive as one row per user (variant, conversion and
   optional revenue, covariate and segments); event-level logs need
   aggregating to users first.
