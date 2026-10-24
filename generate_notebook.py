@@ -275,7 +275,7 @@ cells = [
     code(
         "seed_database({'simulator': {",
         "    'n_users': 40000, 'baseline_rate': 0.20, 'true_effect': 0.02,",
-        "    'covariate_correlation': 0.3, 'seed': 999, 'corrupted_split': None,",
+        "    'covariate_correlation': 0.0, 'seed': 999, 'corrupted_split': None,",
         "    'revenue_mean': 50.0, 'revenue_lift': 0.10, 'revenue_sigma': 1.0,",
         "    'revenue_covariate_effect': 1.0,",
         "}})",
