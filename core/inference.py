@@ -40,7 +40,7 @@ class InferenceResult:
     alpha: float
     p_value: float
     standard_error: float
-    degrees_freedom: float
+    degrees_freedom: float | None  # None = normal approximation (delta method)
     n_control: int
     n_treatment: int
 
@@ -192,3 +192,76 @@ def variance_reduction_pct(y_raw: np.ndarray, y_cuped: np.ndarray) -> float:
         )
 
     return float(100 * (1 - var_cuped / var_raw))
+
+
+def delta_method_ratio_ci(
+    numerator_control: np.ndarray,
+    denominator_control: np.ndarray,
+    numerator_treatment: np.ndarray,
+    denominator_treatment: np.ndarray,
+    alpha: float = 0.05,
+) -> InferenceResult:
+    """
+    Difference in a RATIO metric between arms, e.g. revenue per conversion
+    (average order value) = sum(revenue) / sum(conversions), where both the
+    numerator and denominator are random per-user quantities.
+
+    Why not a t-test on per-order values: the randomization unit is the
+    USER, and one user can place several orders, so orders are not
+    independent observations; treating them as such understates the
+    variance. The delta method keeps users as the unit: with per-user
+    numerator Y and denominator N in one arm, R = mean(Y) / mean(N) and
+
+        Var(R) ~= (1/n) * [ s_Y^2 / m_N^2  -  2 m_Y s_YN / m_N^3
+                           + m_Y^2 s_N^2 / m_N^4 ]
+
+    (first-order Taylor expansion of Y/N around the means). Arms are
+    independent, so SE(R_t - R_c) = sqrt(Var(R_t) + Var(R_c)); CI and
+    p-value use the normal approximation (degrees_freedom=None).
+
+    Sanity identity (tested): if every user has N = 1, R is just mean(Y)
+    and Var(R) reduces to s_Y^2 / n — the Welch standard error.
+    """
+    def ratio_and_variance(y: np.ndarray, n_: np.ndarray) -> tuple[float, float]:
+        y = np.asarray(y, dtype=float)
+        n_ = np.asarray(n_, dtype=float)
+        if len(y) != len(n_):
+            raise ValueError("numerator and denominator arrays must have equal length")
+        if len(y) < 2:
+            raise ValueError(f"Need at least 2 users per arm, got {len(y)}")
+        mean_y, mean_n = y.mean(), n_.mean()
+        if mean_n == 0:
+            raise ValueError(
+                "Denominator mean is zero (no conversions in an arm) — ratio undefined."
+            )
+        cov = np.cov(y, n_, ddof=1)
+        var = (
+            cov[0, 0] / mean_n**2
+            - 2 * mean_y * cov[0, 1] / mean_n**3
+            + mean_y**2 * cov[1, 1] / mean_n**4
+        ) / len(y)
+        return mean_y / mean_n, var
+
+    ratio_c, var_c = ratio_and_variance(numerator_control, denominator_control)
+    ratio_t, var_t = ratio_and_variance(numerator_treatment, denominator_treatment)
+
+    diff = ratio_t - ratio_c
+    se = float(np.sqrt(var_c + var_t))
+    if se == 0 or np.isnan(se):
+        raise ValueError("Delta-method standard error is zero or NaN — degenerate input.")
+
+    z_crit = stats.norm.ppf(1 - alpha / 2)
+    p_value = 2 * stats.norm.sf(abs(diff) / se)
+
+    return InferenceResult(
+        method="delta_ratio",
+        point_estimate=float(diff),
+        ci_lower=float(diff - z_crit * se),
+        ci_upper=float(diff + z_crit * se),
+        alpha=alpha,
+        p_value=float(p_value),
+        standard_error=se,
+        degrees_freedom=None,
+        n_control=len(numerator_control),
+        n_treatment=len(numerator_treatment),
+    )

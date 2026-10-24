@@ -28,7 +28,13 @@ from app.components.segment_panel import render_segment_panel
 from app.components.sequential_panel import render_sequential_panel
 from app.components.upload_or_generate import get_session_engine, render_data_input
 from app.components.validity_panel import render_validity_panel
-from core.data_access import ALLOWED_SEGMENT_COLUMNS, get_inference_data, split_by_variant
+from core.data_access import (
+    ALLOWED_SEGMENT_COLUMNS,
+    get_inference_data,
+    save_planned_schedule,
+    split_arms,
+)
+from core.metrics import METRICS
 from core.pipeline import analyze_experiment
 
 st.set_page_config(page_title="A/B Test Analysis Engine", layout="wide")
@@ -65,7 +71,22 @@ st.subheader("Run Analysis")
 col1, col2, col3 = st.columns(3)
 
 with col1:
-    use_cuped = st.checkbox("Use CUPED variance reduction", value=True)
+    metric_name = st.selectbox(
+        "Metric", options=list(METRICS),
+        help=(
+            "conversion: share of users converting. revenue_per_user: mean revenue "
+            "per user (0 for non-converters). revenue_per_conversion: average order "
+            "value, a ratio metric analysed with the delta method."
+        ),
+    )
+    use_cuped = st.checkbox(
+        "Use CUPED variance reduction", value=True,
+        help="Applies to conversion and revenue_per_user (not to ratio metrics).",
+    )
+    winsorize = st.checkbox(
+        "Winsorize revenue at the 99th percentile",
+        value=False, disabled=metric_name != "revenue_per_user",
+    )
 
 with col2:
     segment_columns = st.multiselect(
@@ -90,9 +111,16 @@ with col3:
 if st.button("▶️ Run analysis", type="primary"):
     engine = get_session_engine()
     try:
+        if enable_sequential:
+            # Store the plan on the experiment so it travels with the data.
+            save_planned_schedule(
+                engine, experiment_id, int(n_checkpoints_planned), int(checkpoint_n)
+            )
         report = analyze_experiment(
             engine,
             experiment_id,
+            metric_name=metric_name,
+            winsorize_quantile=0.99 if winsorize and metric_name == "revenue_per_user" else None,
             use_cuped=use_cuped,
             segment_columns=segment_columns or None,
             n_checkpoints_planned=int(n_checkpoints_planned) if enable_sequential else None,
@@ -114,20 +142,27 @@ st.divider()
 # 3. Report — all five panels, single page
 # --------------------------------------------------------------------- #
 
-render_validity_panel(report.srm, report.achievable_mde)
+render_validity_panel(report.srm, report.achievable_mde, report.metric_name)
 st.divider()
 
-render_effect_panel(report.raw_effect, report.cuped_effect, report.cuped_variance_reduction_pct)
+render_effect_panel(
+    report.raw_effect, report.cuped_effect, report.cuped_variance_reduction_pct,
+    comparisons=report.comparisons,
+)
 st.divider()
 
-control_df, treatment_df = split_by_variant(get_inference_data(get_session_engine(), experiment_id))
+# Checkpoint p-values are logged for the primary comparison (first arm).
+control_df, arm_dfs = split_arms(get_inference_data(get_session_engine(), experiment_id))
+treatment_df = next(iter(arm_dfs.values()))
 
 render_sequential_panel(
     get_session_engine(),
     experiment_id,
     report.sequential_risk,
-    control_converted=control_df["converted"].to_numpy(dtype=float),
-    treatment_converted=treatment_df["converted"].to_numpy(dtype=float),
+    control_df=control_df,
+    treatment_df=treatment_df,
+    metric_name=report.metric_name,
+    winsorization_cap=report.winsorization_cap,
     n_checkpoints_planned=int(n_checkpoints_planned) if enable_sequential else None,
     checkpoint_n=int(checkpoint_n) if enable_sequential else None,
 )

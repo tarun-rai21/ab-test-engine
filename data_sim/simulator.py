@@ -108,13 +108,49 @@ class ExperimentSimulator:
         corrupted_split: float | None = None,
         segment_heterogeneity: dict[str, dict[str, float]] | None = None,
         experiment_id: str | None = None,
+        revenue_mean: float | None = None,
+        revenue_lift: float = 0.0,
+        revenue_sigma: float = 1.0,
+        treatment_arms: dict[str, float] | None = None,
+        allocation: dict[str, float] | None = None,
     ):
+        """
+        treatment_arms: {arm_name: true absolute conversion effect} for A/B/n
+        experiments, e.g. {"treatment": 0.02, "treatment_b": 0.0}. Default
+        None = one arm named "treatment" with true_effect.
+
+        allocation: intended share of users per variant, keyed by "control"
+        and every arm name, summing to 1. Default: equal shares (50/50 for
+        two arms). corrupted_split (the deliberate SRM bug) is two-arm only.
+        """
         if not (0.0 < baseline_rate < 1.0):
             raise ValueError(f"baseline_rate must be in (0,1), got {baseline_rate}")
         if not (-0.99 < covariate_correlation < 0.99):
             raise ValueError(
                 f"covariate_correlation must be in (-0.99, 0.99), got {covariate_correlation}"
             )
+        if revenue_mean is not None and revenue_mean <= 0:
+            raise ValueError(f"revenue_mean must be positive, got {revenue_mean}")
+        if revenue_lift <= -1.0:
+            raise ValueError(f"revenue_lift must be > -1, got {revenue_lift}")
+        if revenue_sigma <= 0:
+            raise ValueError(f"revenue_sigma must be positive, got {revenue_sigma}")
+        arm_effects = dict(treatment_arms) if treatment_arms else {"treatment": true_effect}
+        if "control" in arm_effects:
+            raise ValueError("'control' cannot be a treatment arm name.")
+        if corrupted_split is not None and len(arm_effects) > 1:
+            raise ValueError("corrupted_split only applies to two-arm experiments.")
+        if allocation is not None:
+            expected_keys = {"control", *arm_effects}
+            if set(allocation) != expected_keys:
+                raise ValueError(
+                    f"allocation keys {sorted(allocation)} must be exactly {sorted(expected_keys)}"
+                )
+            shares = list(allocation.values())
+            if not np.isclose(sum(shares), 1.0, atol=1e-6) or min(shares) <= 0:
+                raise ValueError(
+                    f"allocation shares must be positive and sum to 1, got {allocation}"
+                )
         if segment_heterogeneity and len(segment_heterogeneity) > 1:
             raise ValueError(
                 "Only one segment column may carry configured heterogeneity per generate() call."
@@ -129,6 +165,11 @@ class ExperimentSimulator:
         self.segment_heterogeneity = segment_heterogeneity
         self.experiment_id = experiment_id or f"exp_seed{seed}"
         self.segment_column = next(iter(segment_heterogeneity)) if segment_heterogeneity else None
+        self.revenue_mean = revenue_mean
+        self.revenue_lift = revenue_lift
+        self.revenue_sigma = revenue_sigma
+        self.arm_effects = dict(sorted(arm_effects.items()))
+        self.allocation = allocation
 
     # ------------------------------------------------------------------ #
 
@@ -143,10 +184,10 @@ class ExperimentSimulator:
         p_baseline = expit(intercept + slope * z)
 
         variant = self._assign_variant(rng)
-        effect_per_user = self._compute_effect_per_user(users_df)
+        effect_per_user = self._compute_effect_per_user(users_df, variant)
 
         p_final = p_baseline.copy()
-        is_treatment = variant == "treatment"
+        is_treatment = variant != "control"
         p_final[is_treatment] = np.clip(
             p_baseline[is_treatment] + effect_per_user[is_treatment], 0.0, 1.0
         )
@@ -162,9 +203,15 @@ class ExperimentSimulator:
             users_df, is_treatment, p_final - p_baseline
         )
         realized_baseline_rate = float(p_baseline.mean())
+        arm_effects_realized = {
+            arm: float((p_final - p_baseline)[variant == arm].mean())
+            if (variant == arm).any() else float("nan")
+            for arm in self.arm_effects
+        }
 
         assignments_df = self._build_assignments(users_df["user_id"], variant)
-        events_df = self._build_events(users_df["user_id"], converted)
+        order_values = self._order_values(rng, converted, is_treatment)
+        events_df = self._build_events(users_df["user_id"], converted, order_values)
 
         ground_truth = GroundTruth(
             n_users=self.n_users,
@@ -183,6 +230,10 @@ class ExperimentSimulator:
             covariate_correlation_realized=realized_corr,
             true_effect_realized=realized_effect,
             segment_effects_realized=segment_effects_realized,
+            revenue_mean=self.revenue_mean,
+            revenue_lift=self.revenue_lift,
+            arm_effects_configured=dict(self.arm_effects),
+            arm_effects_realized=arm_effects_realized,
         )
 
         return users_df, assignments_df, events_df, ground_truth
@@ -347,14 +398,33 @@ class ExperimentSimulator:
         _CALIBRATION_CACHE[cache_key] = result
         return result
 
-    def _assign_variant(self, rng: np.random.Generator) -> np.ndarray:
-        treatment_prob = self.corrupted_split if self.corrupted_split is not None else 0.5
-        return rng.choice(
-            ["control", "treatment"], size=self.n_users, p=[1 - treatment_prob, treatment_prob]
-        )
+    def intended_allocation(self) -> dict[str, float]:
+        """
+        The DESIGNED share of users per variant (control first, then arms) —
+        what variants.split_pct should record. Deliberately ignores
+        corrupted_split, which simulates a randomization bug, not the design.
+        """
+        names = ["control", *self.arm_effects]
+        if self.allocation is not None:
+            return {name: self.allocation[name] for name in names}
+        return {name: 1 / len(names) for name in names}
 
-    def _compute_effect_per_user(self, users_df: pd.DataFrame) -> np.ndarray:
-        effect = np.full(self.n_users, self.true_effect, dtype=float)
+    def _assign_variant(self, rng: np.random.Generator) -> np.ndarray:
+        names = ["control", *self.arm_effects]
+        if self.corrupted_split is not None:
+            probs = [1 - self.corrupted_split, self.corrupted_split]
+        elif self.allocation is not None:
+            probs = [self.allocation[name] for name in names]
+        else:
+            probs = [1 / len(names)] * len(names)
+        # For the default two-arm case this is exactly the original
+        # rng.choice(["control", "treatment"], p=[0.5, 0.5]) call, so
+        # existing seeds reproduce identical assignments.
+        return rng.choice(names, size=self.n_users, p=probs)
+
+    def _compute_effect_per_user(self, users_df: pd.DataFrame, variant: np.ndarray) -> np.ndarray:
+        """Each user's arm effect (0 for control; applied to treated users only)."""
+        effect = np.array([self.arm_effects.get(v, 0.0) for v in variant], dtype=float)
         if self.segment_column:
             seg_map = self.segment_heterogeneity[self.segment_column]
             segment_values = users_df[self.segment_column].to_numpy()
@@ -385,18 +455,36 @@ class ExperimentSimulator:
         return realized
 
     def _build_assignments(self, user_ids: pd.Series, variant: np.ndarray) -> pd.DataFrame:
-        variant_id_map = {
-            "control": f"{self.experiment_id}_control",
-            "treatment": f"{self.experiment_id}_treatment",
-        }
         return pd.DataFrame({
             "user_id": user_ids,
             "experiment_id": self.experiment_id,
-            "variant_id": [variant_id_map[v] for v in variant],
+            "variant_id": [f"{self.experiment_id}_{v}" for v in variant],
             "assigned_at": datetime(2025, 1, 1),
         })
 
-    def _build_events(self, user_ids: pd.Series, converted: np.ndarray) -> pd.DataFrame:
+    def _order_values(
+        self, rng: np.random.Generator, converted: np.ndarray, is_treatment: np.ndarray
+    ) -> np.ndarray:
+        """
+        Order value for each user (only meaningful where converted == 1).
+
+        revenue_mean=None -> every conversion has value 1.0 (the original
+        behaviour; no extra random draws, so existing seeds reproduce the
+        exact same data). Otherwise values are LOG-NORMAL — right-skewed
+        and heavy-tailed like real order values — with mean revenue_mean in
+        control and revenue_mean * (1 + revenue_lift) in treatment:
+        mu = ln(mean) - sigma^2 / 2 gives E[value] = mean exactly.
+        """
+        if self.revenue_mean is None:
+            return np.ones(self.n_users)
+        treatment_mean = self.revenue_mean * (1 + self.revenue_lift)
+        means = np.where(is_treatment, treatment_mean, self.revenue_mean)
+        mu = np.log(means) - self.revenue_sigma**2 / 2
+        return rng.lognormal(mean=mu, sigma=self.revenue_sigma)
+
+    def _build_events(
+        self, user_ids: pd.Series, converted: np.ndarray, order_values: np.ndarray
+    ) -> pd.DataFrame:
         converted_mask = converted.astype(bool)
         converted_ids = user_ids[converted_mask].to_numpy()
         return pd.DataFrame({
@@ -405,5 +493,5 @@ class ExperimentSimulator:
             "experiment_id": self.experiment_id,
             "event_type": "conversion",
             "event_timestamp": datetime(2025, 1, 2),
-            "value": 1.0,
+            "value": order_values[converted_mask],
         })

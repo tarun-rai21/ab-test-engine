@@ -294,10 +294,21 @@ available. Matches published ldbounds values (K=5: z = 4.877, 3.357,
 5.0% ± 0.2pp under irregular spacing; t-test simulation FPR 5.25%
 (equal) and 5.05% (irregular) over 2000 runs.
 
-### Still open (design limitations, not bugs)
+### Follow-up: remaining design limitations
 
-No segment interaction
-test and BH applied per segment column; binary metric and two arms only;
-no planned-schedule column in the schema; GET `/report` recomputes;
-Streamlit covered by one headless smoke run rather than UI tests;
-Starlette's `httpx` → `httpx2` deprecation warning in the test client.
+Resolved on branch `close-remaining-limitations`, one commit each:
+
+| Limitation | Resolution | Evidence |
+|---|---|---|
+| Planned schedule not stored | `experiments.n_checkpoints_planned` / `checkpoint_n` with in-place column migrations; pipeline falls back to the stored schedule; `PUT /experiments/{id}/schedule` | Schedule and migration tests |
+| Binary metric only | `revenue_per_user` (Welch, optional winsorization) and `revenue_per_conversion` (delta method); simulator generates log-normal order values | CI coverage 95.2% / 94.8%; delta SE matches bootstrap |
+| Two arms only | A/B/n via variant names; Holm-adjusted comparisons; per-arm segments; simulator allocation follows the declared split (also fixes a 90/10 design being SRM-flagged) | FWER 4.45% Holm vs 13.05% unadjusted |
+| No interaction test; BH per column | Cochran's Q heterogeneity test; one BH across every segment test in a report | Q rejection 4.60% (null), 88.5% (theory 87%) |
+| GET `/report` recomputes | Full report + parameters stored in `analysis_reports`; result rows store p-value, SE, df, arm sizes; GET serves the stored report or 404 | Tests that the stored report survives data changes and matches POST |
+
+### Still open
+
+Holm instead of Dunnett for multi-arm; sequential check monitors one
+p-value series per experiment; no CUPED for ratio metrics; Streamlit
+covered by headless smoke runs rather than UI tests; Starlette's `httpx` →
+`httpx2` deprecation warning in the test client.

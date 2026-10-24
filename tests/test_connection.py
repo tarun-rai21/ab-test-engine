@@ -72,3 +72,30 @@ def test_create_memory_engine_returns_isolated_databases():
         ))
     with b.connect() as conn:
         assert conn.execute(text("SELECT COUNT(*) FROM experiments")).scalar() == 0
+
+
+def test_init_schema_adds_columns_missing_from_an_older_database():
+    """
+    CREATE TABLE IF NOT EXISTS never alters an existing table, so a
+    database created before the planned-schedule columns existed must get
+    them from init_schema's column migrations.
+    """
+    engine = get_engine()
+    with engine.begin() as conn:
+        conn.execute(text(
+            "CREATE TABLE experiments (experiment_id TEXT PRIMARY KEY, name TEXT NOT NULL, "
+            "hypothesis TEXT, start_date DATE NOT NULL, end_date DATE, "
+            "status TEXT NOT NULL DEFAULT 'running')"
+        ))
+        conn.execute(text(
+            "INSERT INTO experiments (experiment_id, name, start_date) "
+            "VALUES ('old', 'x', '2025-01-01')"
+        ))
+
+    init_schema(engine)
+    init_schema(engine)  # idempotent: second run must not try to re-add
+
+    with engine.connect() as conn:
+        columns = {row[1] for row in conn.execute(text("PRAGMA table_info(experiments)"))}
+        assert {"n_checkpoints_planned", "checkpoint_n"} <= columns
+        assert conn.execute(text("SELECT COUNT(*) FROM experiments")).scalar() == 1

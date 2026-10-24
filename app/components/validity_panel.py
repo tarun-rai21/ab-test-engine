@@ -19,7 +19,9 @@ import streamlit as st
 from core.validity import SRMResult
 
 
-def render_validity_panel(srm: SRMResult, achievable_mde: float | None) -> None:
+def render_validity_panel(
+    srm: SRMResult, achievable_mde: float | None, metric_name: str = "conversion"
+) -> None:
     st.subheader("Validity Checks")
 
     if srm.flagged:
@@ -62,7 +64,9 @@ def render_validity_panel(srm: SRMResult, achievable_mde: float | None) -> None:
     else:
         st.metric(
             "Smallest effect this sample size could reliably detect",
-            f"{achievable_mde:.2%}",
+            # Conversion effects are percentage points; revenue effects are
+            # in currency units.
+            f"{achievable_mde:.2%}" if metric_name == "conversion" else f"{achievable_mde:,.2f}",
         )
         st.caption(
             "If your observed effect estimate is smaller than this number, "

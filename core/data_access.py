@@ -12,6 +12,8 @@ bug in the other; each has been proven correct independently.
 
 from __future__ import annotations
 
+import json
+
 import pandas as pd
 from sqlalchemy import Engine, text
 
@@ -73,8 +75,12 @@ def get_inference_data(
     segment_columns: list[str] | None = None,
 ) -> pd.DataFrame:
     """
-    Returns one row per user: user_id, variant_id, pre_period_covariate,
-    converted, plus whichever segment columns were requested.
+    Returns one row per user: user_id, variant_id, variant_name (the
+    variants table's name: 'control' or a treatment arm), pre_period_covariate,
+    converted (0/1), n_conversions (count of conversion events) and revenue
+    (sum of their values, 0 for non-converters), plus whichever segment
+    columns were requested. converted feeds the conversion metric; revenue
+    and n_conversions feed the revenue metrics (core.metrics).
 
     segment_columns controls which optional segment dimensions (from
     ALLOWED_SEGMENT_COLUMNS) are included:
@@ -140,15 +146,19 @@ def get_inference_data(
 
     query = text(
         f"""
-        SELECT u.user_id, a.variant_id, u.pre_period_covariate{segment_select},
-               CASE WHEN COUNT(e.event_id) > 0 THEN 1 ELSE 0 END AS converted
+        SELECT u.user_id, a.variant_id, v.name AS variant_name,
+               u.pre_period_covariate{segment_select},
+               CASE WHEN COUNT(e.event_id) > 0 THEN 1 ELSE 0 END AS converted,
+               COUNT(e.event_id) AS n_conversions,
+               COALESCE(SUM(e.value), 0.0) AS revenue
         FROM assignments a
         JOIN users u ON a.user_id = u.user_id
+        JOIN variants v ON v.variant_id = a.variant_id
         LEFT JOIN events e
             ON e.user_id = a.user_id AND e.experiment_id = a.experiment_id
             AND e.event_type = 'conversion'
         WHERE a.experiment_id = :experiment_id
-        GROUP BY u.user_id, a.variant_id, u.pre_period_covariate{segment_group_by}
+        GROUP BY u.user_id, a.variant_id, v.name, u.pre_period_covariate{segment_group_by}
         ORDER BY u.user_id
         """
     )
@@ -161,32 +171,58 @@ def get_inference_data(
     return df
 
 
-def split_by_variant(
-    df: pd.DataFrame,
-    control_suffix: str = "_control",
-    treatment_suffix: str = "_treatment",
-) -> tuple[pd.DataFrame, pd.DataFrame]:
+def split_arms(df: pd.DataFrame) -> tuple[pd.DataFrame, dict[str, pd.DataFrame]]:
     """
-    Splits get_inference_data()'s output into (control_df, treatment_df) by
-    variant_id suffix — matches the naming convention fixed in Phase 1's
-    ExperimentSimulator._build_assignments() (f"{experiment_id}_control" /
-    f"{experiment_id}_treatment").
+    Splits get_inference_data()'s output into the control group and one
+    DataFrame per treatment arm: (control_df, {arm_name: arm_df}), arms in
+    sorted name order.
 
-    Raises if either group is empty rather than letting an empty DataFrame
-    propagate silently into raw_ttest_ci(), which requires n>=2 per group —
-    failing here gives a clear, specific error message instead of a confusing
-    downstream ValueError with no context about WHY the group was empty.
+    Arms are identified by the variants table's NAME (variant_name column):
+    "control" is the control group, every other name is a treatment arm —
+    so A/B/n experiments (e.g. control, treatment, treatment_b) work. A
+    DataFrame without variant_name (hand-built in tests) falls back to the
+    variant_id suffix convention: ids ending "_control" are control, every
+    other distinct variant_id is an arm.
+
+    Raises if control or every arm is empty, rather than letting an empty
+    group propagate into raw_ttest_ci(), which requires n>=2 per group.
     """
-    control_df = df[df["variant_id"].str.endswith(control_suffix)]
-    treatment_df = df[df["variant_id"].str.endswith(treatment_suffix)]
+    if "variant_name" in df.columns:
+        is_control = df["variant_name"] == "control"
+        arm_key = df["variant_name"]
+    else:
+        is_control = df["variant_id"].str.endswith("_control")
+        arm_key = df["variant_id"]
 
-    if control_df.empty or treatment_df.empty:
+    control_df = df[is_control]
+    treated = df[~is_control]
+    arms = {
+        str(name): group
+        for name, group in sorted(treated.groupby(arm_key[~is_control]), key=lambda kv: kv[0])
+    }
+    if control_df.empty or not arms:
         raise ValueError(
             f"Split produced an empty group: control={len(control_df)}, "
-            f"treatment={len(treatment_df)}. Check variant_id naming convention "
-            f"matches '{{experiment_id}}{control_suffix}' / '{{experiment_id}}{treatment_suffix}'."
+            f"treatment arms={list(arms)}. A variant named 'control' (or a "
+            f"variant_id ending in '_control') and at least one other variant "
+            f"are required."
         )
-    return control_df, treatment_df
+    return control_df, arms
+
+
+def split_by_variant(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """
+    Two-arm convenience wrapper around split_arms(): returns
+    (control_df, treatment_df). Raises ValueError if the data has more
+    than one treatment arm — use split_arms() for A/B/n experiments.
+    """
+    control_df, arms = split_arms(df)
+    if len(arms) > 1:
+        raise ValueError(
+            f"Data has {len(arms)} treatment arms ({list(arms)}); use split_arms() "
+            f"for multi-arm experiments."
+        )
+    return control_df, next(iter(arms.values()))
 
 
 def get_sequential_checkpoints(engine: Engine, experiment_id: str) -> list[dict]:
@@ -225,3 +261,80 @@ def get_sequential_checkpoints(engine: Engine, experiment_id: str) -> list[dict]
         {"cumulative_n": int(row.cumulative_n), "p_value_at_check": float(row.p_value_at_check)}
         for row in rows
     ]
+
+
+def get_planned_schedule(engine: Engine, experiment_id: str) -> tuple[int, int] | None:
+    """
+    Returns the experiment's stored (n_checkpoints_planned, checkpoint_n),
+    or None if no schedule was stored (either column NULL) or the
+    experiment doesn't exist. checkpoint_n is TOTAL users across arms.
+    """
+    query = text(
+        """
+        SELECT n_checkpoints_planned, checkpoint_n
+        FROM experiments
+        WHERE experiment_id = :experiment_id
+        """
+    )
+    with engine.connect() as conn:
+        row = conn.execute(query, {"experiment_id": experiment_id}).fetchone()
+
+    if row is None or row.n_checkpoints_planned is None or row.checkpoint_n is None:
+        return None
+    return int(row.n_checkpoints_planned), int(row.checkpoint_n)
+
+
+def save_planned_schedule(
+    engine: Engine, experiment_id: str, n_checkpoints_planned: int, checkpoint_n: int
+) -> None:
+    """
+    Stores the experiment's planned sequential-monitoring schedule, so later
+    analyses can run the peeking check without the caller re-supplying it.
+    Raises ValueError for non-positive values or an unknown experiment.
+    """
+    if n_checkpoints_planned < 1 or checkpoint_n < 1:
+        raise ValueError(
+            f"n_checkpoints_planned and checkpoint_n must be >= 1, got "
+            f"{n_checkpoints_planned} and {checkpoint_n}"
+        )
+    query = text(
+        """
+        UPDATE experiments
+        SET n_checkpoints_planned = :n_planned, checkpoint_n = :checkpoint_n
+        WHERE experiment_id = :experiment_id
+        """
+    )
+    with engine.begin() as conn:
+        result = conn.execute(query, {
+            "n_planned": n_checkpoints_planned,
+            "checkpoint_n": checkpoint_n,
+            "experiment_id": experiment_id,
+        })
+    if result.rowcount == 0:
+        raise ValueError(f"No experiment found with experiment_id={experiment_id!r}.")
+
+
+def get_stored_report(engine: Engine, experiment_id: str, metric_name: str) -> dict | None:
+    """
+    Returns the latest persisted report for (experiment, metric) as
+    {"report": ..., "parameters": ..., "computed_at": ...}, or None if that
+    metric has never been analysed with persist=True.
+    """
+    query = text(
+        """
+        SELECT report_json, parameters_json, computed_at
+        FROM analysis_reports
+        WHERE experiment_id = :experiment_id AND metric_name = :metric_name
+        """
+    )
+    with engine.connect() as conn:
+        row = conn.execute(
+            query, {"experiment_id": experiment_id, "metric_name": metric_name}
+        ).fetchone()
+    if row is None:
+        return None
+    return {
+        "report": json.loads(row.report_json),
+        "parameters": json.loads(row.parameters_json),
+        "computed_at": str(row.computed_at),
+    }

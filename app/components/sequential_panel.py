@@ -19,12 +19,12 @@ import uuid
 from datetime import datetime, timezone
 
 import matplotlib.pyplot as plt
-import numpy as np
+import pandas as pd
 import streamlit as st
 from sqlalchemy import text
 
 from core.data_access import get_sequential_checkpoints
-from core.inference import raw_ttest_ci
+from core.metrics import estimate_effect
 from core.sequential import SequentialCheckResult, lan_demets_boundary
 
 
@@ -97,8 +97,10 @@ def render_sequential_panel(
     engine,
     experiment_id: str,
     sequential_risk: SequentialCheckResult | None,
-    control_converted: np.ndarray,
-    treatment_converted: np.ndarray,
+    control_df: pd.DataFrame,
+    treatment_df: pd.DataFrame,
+    metric_name: str = "conversion",
+    winsorization_cap: float | None = None,
     n_checkpoints_planned: int | None = None,
     checkpoint_n: int | None = None,
 ) -> None:
@@ -109,7 +111,7 @@ def render_sequential_panel(
         "risk across repeated looks at this experiment."
     )
 
-    max_n_per_arm = min(len(control_converted), len(treatment_converted))
+    max_n_per_arm = min(len(control_df), len(treatment_df))
     if max_n_per_arm < 2:
         st.info("Not enough data generated to simulate a checkpoint history.")
         return
@@ -127,10 +129,17 @@ def render_sequential_panel(
     )
 
     if st.button("📌 Log this checkpoint"):
-        prefix_result = raw_ttest_ci(
-            control_converted[:checkpoint_n_per_arm],
-            treatment_converted[:checkpoint_n_per_arm],
-        )
+        # Same metric and estimator as the main analysis, on the first
+        # n users per arm.
+        try:
+            prefix_result = estimate_effect(
+                control_df.iloc[:checkpoint_n_per_arm],
+                treatment_df.iloc[:checkpoint_n_per_arm],
+                metric_name, winsorization_cap,
+            )
+        except ValueError as exc:
+            st.error(f"Cannot compute a p-value at this sample size: {exc}")
+            return
         cumulative_n = checkpoint_n_per_arm * 2
         # Record the threshold that actually applied at this look: the
         # Lan-DeMets boundary given every look up to and including this one

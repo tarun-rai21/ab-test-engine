@@ -13,6 +13,7 @@ stack table: "matplotlib for static report plots... CI comparison bars").
 from __future__ import annotations
 
 import matplotlib.pyplot as plt
+import pandas as pd
 import streamlit as st
 
 from core.inference import InferenceResult
@@ -40,12 +41,39 @@ def _render_ci_bar(raw_effect: InferenceResult, cuped_effect: InferenceResult | 
     st.pyplot(fig)
 
 
+def _render_arm_table(comparisons) -> None:
+    """Every treatment arm vs control, with Holm-adjusted p-values."""
+    rows = []
+    for c in comparisons:
+        best = c.cuped_effect or c.raw_effect
+        best_p = c.cuped_p_value_holm if c.cuped_effect is not None else c.raw_p_value_holm
+        rows.append({
+            "Arm": c.treatment_arm,
+            "Effect vs control": f"{best.point_estimate:+.4f}",
+            "95% CI": f"[{best.ci_lower:.4f}, {best.ci_upper:.4f}]",
+            "Estimator": best.method,
+            "p-value": f"{best.p_value:.4g}",
+            "Holm-adjusted p": f"{best_p:.4g}",
+            "Significant (Holm)": "Yes" if best_p < 0.05 else "No",
+        })
+    st.dataframe(pd.DataFrame(rows), hide_index=True, width="stretch")
+    st.caption(
+        "Each arm is compared with control. Holm-adjusted p-values control the "
+        "chance of declaring ANY arm a false winner at 5%. Unadjusted CIs are shown."
+    )
+
+
 def render_effect_panel(
     raw_effect: InferenceResult,
     cuped_effect: InferenceResult | None,
     cuped_variance_reduction_pct: float | None,
+    comparisons: tuple = (),
 ) -> None:
     st.subheader("Effect Estimate")
+
+    if len(comparisons) > 1:
+        _render_arm_table(comparisons)
+        st.markdown(f"**Primary comparison: `{comparisons[0].treatment_arm}` vs control**")
 
     _render_ci_bar(raw_effect, cuped_effect)
 

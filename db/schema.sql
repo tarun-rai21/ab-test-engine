@@ -21,7 +21,12 @@ CREATE TABLE IF NOT EXISTS experiments (
     hypothesis     TEXT,
     start_date     DATE NOT NULL,
     end_date       DATE,
-    status         TEXT NOT NULL DEFAULT 'running'      -- 'running' | 'stopped' | 'analyzed'
+    status         TEXT NOT NULL DEFAULT 'running',     -- 'running' | 'stopped' | 'analyzed'
+    -- Planned sequential-monitoring schedule (optional): n_checkpoints_planned
+    -- looks of checkpoint_n TOTAL users (both arms). Their product is the
+    -- planned total sample size the Lan-DeMets boundary spends alpha against.
+    n_checkpoints_planned  INTEGER,
+    checkpoint_n           INTEGER
 );
 
 CREATE TABLE IF NOT EXISTS variants (
@@ -58,8 +63,25 @@ CREATE TABLE IF NOT EXISTS experiment_results (
     ci_lower        REAL NOT NULL,
     ci_upper        REAL NOT NULL,
     trusted         BOOLEAN NOT NULL DEFAULT 1,  -- FALSE if SRM was flagged at compute time
-    method          TEXT NOT NULL,               -- 'raw_ttest' | 'cuped' | 'segment'
-    computed_at     TIMESTAMP NOT NULL
+    method          TEXT NOT NULL,               -- 'raw_ttest' | 'cuped' | 'delta_ratio'
+    computed_at     TIMESTAMP NOT NULL,
+    p_value         REAL,
+    standard_error  REAL,
+    degrees_freedom REAL,                         -- NULL = normal approximation
+    n_control       INTEGER,
+    n_treatment     INTEGER
+);
+
+-- The complete AnalysisReport from the latest persisted analysis of each
+-- (experiment, metric), as JSON, plus the analysis parameters that produced
+-- it. GET /experiments/{id}/report serves this without recomputation.
+CREATE TABLE IF NOT EXISTS analysis_reports (
+    experiment_id    TEXT NOT NULL REFERENCES experiments(experiment_id),
+    metric_name      TEXT NOT NULL,
+    report_json      TEXT NOT NULL,
+    parameters_json  TEXT NOT NULL,
+    computed_at      TIMESTAMP NOT NULL,
+    PRIMARY KEY (experiment_id, metric_name)
 );
 
 CREATE TABLE IF NOT EXISTS sequential_checkpoints (

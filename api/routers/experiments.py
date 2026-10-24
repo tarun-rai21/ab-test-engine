@@ -19,9 +19,10 @@ from api.schemas import (
     AssignResponse,
     ExperimentCreateRequest,
     ExperimentCreateResponse,
+    PlannedScheduleRequest,
     SRMCheckSummary,
 )
-from core.data_access import get_variant_counts
+from core.data_access import get_variant_counts, save_planned_schedule
 from core.validity import srm_check
 from db.connection import get_engine
 from db.seed import seed_assignments_for_existing_experiment
@@ -97,7 +98,29 @@ def create_experiment(request: ExperimentCreateRequest) -> ExperimentCreateRespo
                 },
             )
 
+    if request.schedule is not None:
+        save_planned_schedule(
+            engine, experiment_id,
+            request.schedule.n_checkpoints_planned, request.schedule.checkpoint_n,
+        )
+
     return ExperimentCreateResponse(experiment_id=experiment_id, status="created")
+
+
+@router.put("/{experiment_id}/schedule", response_model=PlannedScheduleRequest)
+def set_schedule(experiment_id: str, request: PlannedScheduleRequest) -> PlannedScheduleRequest:
+    """
+    Stores (or replaces) the experiment's planned sequential-monitoring
+    schedule, so POST /analyze can run the peeking check without the
+    caller re-supplying it on every request.
+    """
+    try:
+        save_planned_schedule(
+            get_engine(), experiment_id, request.n_checkpoints_planned, request.checkpoint_n
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return request
 
 
 @router.post("/{experiment_id}/assign", response_model=AssignResponse)
@@ -143,21 +166,34 @@ def assign(experiment_id: str, request: AssignRequest) -> AssignResponse:
         )
 
     with engine.connect() as conn:
-        variant_names = conn.execute(
-            text("SELECT name FROM variants WHERE experiment_id = :eid"),
+        variant_splits = dict(conn.execute(
+            text("SELECT name, split_pct FROM variants WHERE experiment_id = :eid"),
             {"eid": experiment_id},
-        ).scalars().all()
-    if "control" not in variant_names or "treatment" not in variant_names:
+        ).fetchall())
+    variant_names = sorted(variant_splits)
+    arm_names = [name for name in variant_names if name != "control"]
+    if "control" not in variant_splits or not arm_names:
         raise HTTPException(
             status_code=400,
             detail=(
-                f"Experiment {experiment_id!r} does not have both a 'control' and "
-                f"'treatment' variant (found: {variant_names}). The simulator "
-                f"requires exactly these two variant names to generate data — "
-                f"create the experiment with variants named 'control' and "
-                f"'treatment' to use mode='simulate'."
+                f"Experiment {experiment_id!r} needs a variant named 'control' and at "
+                f"least one treatment variant (found: {variant_names}). Generated "
+                f"assignments reference variant_ids built from these names."
             ),
         )
+    unknown_arms = set(request.arm_effects or {}) - set(arm_names)
+    if unknown_arms:
+        raise HTTPException(
+            status_code=422,
+            detail=f"arm_effects names {sorted(unknown_arms)} are not treatment variants "
+                   f"of this experiment ({arm_names}).",
+        )
+    # Every arm gets true_effect unless arm_effects overrides it; users are
+    # allocated by the experiment's declared split_pct values (the design),
+    # so an unequal design like 90/10 is simulated as intended.
+    treatment_arms = {
+        name: (request.arm_effects or {}).get(name, request.true_effect) for name in arm_names
+    }
 
     sim_cfg = {
         "n_users": request.n_users,
@@ -167,6 +203,11 @@ def assign(experiment_id: str, request: AssignRequest) -> AssignResponse:
         "seed": request.seed,
         "corrupted_split": request.corrupted_split,
         "segment_heterogeneity": request.segment_heterogeneity,
+        "revenue_mean": request.revenue_mean,
+        "revenue_lift": request.revenue_lift,
+        "revenue_sigma": request.revenue_sigma,
+        "treatment_arms": treatment_arms,
+        "allocation": variant_splits,
     }
     try:
         seed_assignments_for_existing_experiment(experiment_id, sim_cfg)

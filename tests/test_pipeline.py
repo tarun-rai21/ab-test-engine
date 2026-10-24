@@ -23,6 +23,7 @@ from datetime import datetime, timezone
 import pytest
 from sqlalchemy import text
 
+from core.data_access import get_planned_schedule, save_planned_schedule
 from core.pipeline import analyze_experiment
 from db.connection import get_engine, init_schema, reset_engine
 from db.seed import seed_database
@@ -339,12 +340,10 @@ def test_sequential_check_skipped_with_zero_checkpoints_but_runs_on_first(isolat
     assert report_one.sequential_risk.disagreement is True
 
 
-def test_sequential_check_skipped_without_planned_params(isolated_db):
+def test_sequential_check_skipped_without_any_planned_schedule(isolated_db):
     """
-    Checkpoints exist in the DB, but the caller didn't supply
-    n_checkpoints_planned/checkpoint_n — must skip gracefully (None), not
-    guess or crash. See core/pipeline.py's design decision 4 for why these
-    can't be inferred from the schema.
+    Checkpoints exist, but no schedule was supplied by the caller or stored
+    on the experiment — must skip gracefully (None), not guess or crash.
     """
     engine = isolated_db
     config = {"simulator": {
@@ -358,6 +357,48 @@ def test_sequential_check_skipped_without_planned_params(isolated_db):
 
     report = analyze_experiment(engine, "exp_seed111")  # no planned params
     assert report.sequential_risk is None
+
+
+def test_sequential_check_uses_schedule_stored_on_experiment(isolated_db):
+    """
+    The planned schedule used to have no home in the schema, so every
+    caller had to re-supply it. Once stored, the check runs without it;
+    explicit arguments still override the stored values.
+    """
+    engine = isolated_db
+    seed_database({"simulator": {
+        "n_users": 2000, "baseline_rate": 0.10, "true_effect": 0.0,
+        "covariate_correlation": 0.0, "seed": 112, "corrupted_split": None,
+    }}, database_url="sqlite:///:memory:")
+    _insert_checkpoint(engine, "exp_seed112", "cp1", 400, 0.03)
+
+    save_planned_schedule(engine, "exp_seed112", n_checkpoints_planned=10, checkpoint_n=200)
+    assert get_planned_schedule(engine, "exp_seed112") == (10, 200)
+
+    stored = analyze_experiment(engine, "exp_seed112", persist=False).sequential_risk
+    assert stored is not None
+    assert stored.information_fraction == pytest.approx(0.2)
+
+    override = analyze_experiment(
+        engine, "exp_seed112", n_checkpoints_planned=2, checkpoint_n=200, persist=False
+    ).sequential_risk
+    assert override.information_fraction == pytest.approx(1.0)
+
+
+def test_partial_planned_schedule_raises(isolated_db):
+    seed_database({"simulator": {
+        "n_users": 500, "baseline_rate": 0.10, "true_effect": 0.0,
+        "covariate_correlation": 0.0, "seed": 113, "corrupted_split": None,
+    }}, database_url="sqlite:///:memory:")
+    with pytest.raises(ValueError):
+        analyze_experiment(isolated_db, "exp_seed113", n_checkpoints_planned=10, persist=False)
+
+
+def test_save_planned_schedule_validates_input(isolated_db):
+    with pytest.raises(ValueError):
+        save_planned_schedule(isolated_db, "missing_experiment", 10, 200)
+    with pytest.raises(ValueError):
+        save_planned_schedule(isolated_db, "missing_experiment", 0, 200)
 
 
 # ===================================================================== #

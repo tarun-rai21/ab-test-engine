@@ -27,7 +27,8 @@ def render_segment_panel(segments: tuple[SegmentAnalysisResult, ...] | None) -> 
         return
 
     for analysis in segments:
-        st.markdown(f"**By `{analysis.segment_column}`**")
+        arm_label = f" — `{analysis.treatment_arm}` vs control" if analysis.treatment_arm else ""
+        st.markdown(f"**By `{analysis.segment_column}`{arm_label}**")
 
         any_reversal = any(s.reversal_flag for s in analysis.segments)
         if any_reversal:
@@ -60,10 +61,22 @@ def render_segment_panel(segments: tuple[SegmentAnalysisResult, ...] | None) -> 
                 f"{', '.join(analysis.excluded_segments)}"
             )
 
+        if analysis.heterogeneity_p_value is not None:
+            differs = analysis.heterogeneity_p_value < 0.05
+            st.markdown(
+                f"**Do the segment effects differ?** Cochran's Q = "
+                f"{analysis.heterogeneity_q:.2f}, p = {analysis.heterogeneity_p_value:.4g} — "
+                + ("evidence that the effect varies across segments."
+                   if differs else
+                   "no evidence that the effect varies across segments (this test has "
+                   "low power with few or small segments).")
+            )
+
         st.caption(
-            "'Significant (BH-corrected)' uses the Benjamini-Hochberg "
-            "correction across all segments tested in this column, "
-            "controlling the false-discovery rate from testing multiple "
-            "segments at once."
+            "'Significant (BH-corrected)' uses one Benjamini-Hochberg correction "
+            "across every segment tested in this report (all columns and arms), "
+            "controlling the false-discovery rate. A segment being significant "
+            "while another is not does not by itself show their effects differ — "
+            "the Q test above answers that."
         )
         st.divider()

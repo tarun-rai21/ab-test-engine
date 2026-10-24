@@ -31,6 +31,12 @@ class VariantCreateRequest(BaseModel):
     split_pct: float = Field(ge=0.0, le=1.0)
 
 
+class PlannedScheduleRequest(BaseModel):
+    """Planned sequential-monitoring schedule; checkpoint_n is TOTAL users (both arms)."""
+    n_checkpoints_planned: int = Field(ge=1)
+    checkpoint_n: int = Field(ge=1)
+
+
 class ExperimentCreateRequest(BaseModel):
     name: str
     hypothesis: str = ""
@@ -40,6 +46,7 @@ class ExperimentCreateRequest(BaseModel):
             VariantCreateRequest(name="treatment", split_pct=0.5),
         ]
     )
+    schedule: PlannedScheduleRequest | None = None
 
 
 class ExperimentCreateResponse(BaseModel):
@@ -66,6 +73,14 @@ class AssignRequest(BaseModel):
     seed: int = Field(default=42, ge=0)
     corrupted_split: float | None = Field(default=None, gt=0.0, lt=1.0)
     segment_heterogeneity: dict[str, dict[str, float]] | None = None
+    # Order values (None = every conversion worth 1.0): log-normal with this
+    # mean in control and mean * (1 + revenue_lift) in treatment.
+    revenue_mean: float | None = Field(default=None, gt=0.0)
+    revenue_lift: float = Field(default=0.0, gt=-1.0)
+    revenue_sigma: float = Field(default=1.0, gt=0.0)
+    # Per-arm true effects for A/B/n experiments, keyed by treatment variant
+    # name; arms not listed get true_effect.
+    arm_effects: dict[str, float] | None = None
 
 
 class SRMCheckSummary(BaseModel):
@@ -85,7 +100,9 @@ class AssignResponse(BaseModel):
 # ===================================================================== #
 
 class AnalyzeRequest(BaseModel):
-    metric: str = "conversion"
+    metric: Literal["conversion", "revenue_per_user", "revenue_per_conversion"] = "conversion"
+    # revenue_per_user only: cap per-user revenue at this pooled quantile.
+    winsorize_quantile: float | None = Field(default=None, gt=0.5, lt=1.0)
     use_cuped: bool = True
     segment_columns: list[str] | None = None
     n_checkpoints_planned: int | None = Field(default=None, ge=1)
@@ -115,7 +132,7 @@ class InferenceResultSchema(BaseModel):
     alpha: float
     p_value: float
     standard_error: float
-    degrees_freedom: float
+    degrees_freedom: float | None
     n_control: int
     n_treatment: int
 
@@ -148,6 +165,18 @@ class SegmentAnalysisResultSchema(BaseModel):
     pooled_point_estimate: float
     segments: tuple[SegmentResultSchema, ...]
     excluded_segments: tuple[str, ...]
+    treatment_arm: str | None = None
+    heterogeneity_q: float | None = None
+    heterogeneity_p_value: float | None = None
+
+
+class ArmComparisonSchema(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    treatment_arm: str
+    raw_effect: InferenceResultSchema
+    raw_p_value_holm: float
+    cuped_effect: InferenceResultSchema | None
+    cuped_p_value_holm: float | None
 
 
 class AnalysisReportSchema(BaseModel):
@@ -166,3 +195,5 @@ class AnalysisReportSchema(BaseModel):
     cuped_variance_reduction_pct: float | None
     sequential_risk: SequentialCheckResultSchema | None
     segments: tuple[SegmentAnalysisResultSchema, ...] | None
+    winsorization_cap: float | None = None
+    comparisons: tuple[ArmComparisonSchema, ...] = ()

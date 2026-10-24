@@ -18,6 +18,7 @@ and it is designed so that meeting cannot happen incorrectly:
 
 from __future__ import annotations
 
+import json
 from datetime import datetime, timezone
 
 from sqlalchemy import Engine, text
@@ -80,10 +81,12 @@ def persist_inference_result(
                 """
                 INSERT INTO experiment_results
                     (result_id, experiment_id, metric_name, variant_id, segment,
-                     point_estimate, ci_lower, ci_upper, trusted, method, computed_at)
+                     point_estimate, ci_lower, ci_upper, trusted, method, computed_at,
+                     p_value, standard_error, degrees_freedom, n_control, n_treatment)
                 VALUES
                     (:result_id, :experiment_id, :metric_name, :variant_id, :segment,
-                     :point_estimate, :ci_lower, :ci_upper, :trusted, :method, :computed_at)
+                     :point_estimate, :ci_lower, :ci_upper, :trusted, :method, :computed_at,
+                     :p_value, :standard_error, :degrees_freedom, :n_control, :n_treatment)
                 """
             ),
             {
@@ -95,6 +98,11 @@ def persist_inference_result(
                 "point_estimate": inference_result.point_estimate,
                 "ci_lower": inference_result.ci_lower,
                 "ci_upper": inference_result.ci_upper,
+                "p_value": inference_result.p_value,
+                "standard_error": inference_result.standard_error,
+                "degrees_freedom": inference_result.degrees_freedom,
+                "n_control": inference_result.n_control,
+                "n_treatment": inference_result.n_treatment,
                 "trusted": int(trusted),
                 "method": inference_result.method,
                 "computed_at": computed_at,
@@ -129,5 +137,45 @@ def persist_srm_result(engine: Engine, experiment_id: str, srm_result: SRMResult
                 "p_value": srm_result.p_value,
                 "flagged": int(srm_result.flagged),
                 "checked_at": datetime.now(timezone.utc).isoformat(),
+            },
+        )
+
+
+def persist_report(
+    engine: Engine,
+    experiment_id: str,
+    metric_name: str,
+    report_payload: dict,
+    parameters: dict,
+) -> None:
+    """
+    Stores the complete report (already converted to plain JSON-compatible
+    data, e.g. via dataclasses.asdict) and the analysis parameters that
+    produced it, replacing any earlier report for the same (experiment,
+    metric). GET /experiments/{id}/report serves this row directly, so a
+    report can be read back without re-running the analysis.
+    """
+    with engine.begin() as conn:
+        conn.execute(
+            text(
+                "DELETE FROM analysis_reports "
+                "WHERE experiment_id = :eid AND metric_name = :metric"
+            ),
+            {"eid": experiment_id, "metric": metric_name},
+        )
+        conn.execute(
+            text(
+                """
+                INSERT INTO analysis_reports
+                    (experiment_id, metric_name, report_json, parameters_json, computed_at)
+                VALUES (:eid, :metric, :report, :parameters, :computed_at)
+                """
+            ),
+            {
+                "eid": experiment_id,
+                "metric": metric_name,
+                "report": json.dumps(report_payload),
+                "parameters": json.dumps(parameters),
+                "computed_at": datetime.now(timezone.utc).isoformat(),
             },
         )

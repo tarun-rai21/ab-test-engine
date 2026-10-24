@@ -69,3 +69,48 @@ def test_upload_intended_split_drives_srm_check():
 
     ingest_upload(engine, df, "exp_5050", treatment_split=0.50)
     assert analyze_experiment(engine, "exp_5050", persist=False).srm.flagged is True
+
+
+def test_upload_revenue_column_feeds_revenue_metrics():
+    df = _valid_df()
+    is_treatment = df["variant_id"] == "x_treatment"
+    order_value = [30.0 + 10 * (i % 3) for i in range(len(df))] + 20.0 * is_treatment
+    df["revenue"] = df["converted"] * order_value
+    assert validate_upload(df) == []
+
+    engine = create_memory_engine()
+    ingest_upload(engine, df, "exp_rev")
+    report = analyze_experiment(
+        engine, "exp_rev", metric_name="revenue_per_conversion", persist=False
+    )
+    converters = df[df["converted"] == 1]
+    expected = (
+        converters.loc[converters["variant_id"] == "x_treatment", "revenue"].mean()
+        - converters.loc[converters["variant_id"] == "x_control", "revenue"].mean()
+    )
+    assert report.raw_effect.point_estimate == pytest.approx(expected)
+
+
+def test_validate_upload_rejects_bad_revenue():
+    df = _valid_df()
+    df["revenue"] = 10.0  # revenue on non-converting rows
+    assert any("converted = 1" in e for e in validate_upload(df))
+    df["revenue"] = -1.0
+    assert any("non-negative" in e for e in validate_upload(df))
+
+
+def test_upload_with_extra_treatment_arm():
+    df = pd.concat([_valid_df(), _valid_df().assign(variant_id="x_treatment_b").iloc[50:]])
+    assert validate_upload(df) == []
+
+    engine = create_memory_engine()
+    ingest_upload(engine, df, "exp_abn", treatment_split=0.5)
+    report = analyze_experiment(engine, "exp_abn", persist=False)
+
+    assert [c.treatment_arm for c in report.comparisons] == ["treatment", "treatment_b"]
+    assert report.srm.expected_counts == pytest.approx((75.0, 37.5, 37.5))
+
+
+def test_validate_upload_requires_control_and_an_arm():
+    df = _valid_df().assign(variant_id="x_control")
+    assert any("control group and at least one" in e for e in validate_upload(df))

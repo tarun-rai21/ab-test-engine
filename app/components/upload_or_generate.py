@@ -14,7 +14,8 @@ MODE 2 — "Upload CSV": SCOPE DECISION, stated directly rather than
 silently assumed — the CSV must already be shaped like
 core.data_access.get_inference_data()'s OUTPUT (one row per user), not an
 arbitrary raw multi-table schema. Required columns: variant_id (ending in
-"_control"/"_treatment"), converted (0/1). Optional: pre_period_covariate
+"_control", or containing "_treatment" — "_treatment_b" etc. for extra
+arms), converted (0/1). Optional: pre_period_covariate
 (needed for CUPED; without it, CUPED is unavailable for this dataset),
 device_type/region/existing_customer (segment columns). Reconstructing a
 full multi-table schema from an arbitrary spreadsheet is a much bigger,
@@ -64,6 +65,19 @@ def _generate_experiment_id() -> str:
     return f"exp_{uuid.uuid4().hex[:12]}"
 
 
+def arm_name(variant_id: str) -> str | None:
+    """
+    Variant name implied by an uploaded variant_id: '..._control' ->
+    'control'; otherwise the text from the LAST '_treatment' onward, so
+    'exp_treatment' -> 'treatment' and 'exp_treatment_b' -> 'treatment_b'.
+    None if the id matches neither pattern.
+    """
+    if variant_id.endswith("_control"):
+        return "control"
+    position = variant_id.rfind("_treatment")
+    return variant_id[position + 1:] if position != -1 else None
+
+
 def validate_upload(df: pd.DataFrame) -> list[str]:
     """
     Returns a list of human-readable problems with an uploaded DataFrame
@@ -74,17 +88,26 @@ def validate_upload(df: pd.DataFrame) -> list[str]:
         return [f"Missing required column(s): {missing}"]
 
     errors = []
-    variant_ids = df["variant_id"].astype(str)
-    if not variant_ids.str.endswith(("_control", "_treatment")).all():
+    arm_names = [arm_name(v) for v in df["variant_id"].astype(str)]
+    if None in arm_names:
         errors.append(
-            "Every variant_id value must end in '_control' or '_treatment' "
-            "(e.g. 'myexp_control'). Found values that don't match this pattern."
+            "Every variant_id value must end in '_control', or contain '_treatment' "
+            "(e.g. 'myexp_control', 'myexp_treatment', 'myexp_treatment_b'). "
+            "Found values that don't match this pattern."
         )
+    elif "control" not in arm_names or set(arm_names) == {"control"}:
+        errors.append("The data needs a control group and at least one treatment arm.")
     converted = pd.to_numeric(df["converted"], errors="coerce")
     if converted.isna().any() or not converted.isin([0, 1]).all():
         errors.append("Every 'converted' value must be 0 or 1 (no blanks).")
     if "user_id" in df.columns and df["user_id"].duplicated().any():
         errors.append("user_id values must be unique — this format is one row per user.")
+    if "revenue" in df.columns:
+        revenue = pd.to_numeric(df["revenue"], errors="coerce")
+        if revenue.isna().any() or (revenue < 0).any():
+            errors.append("revenue must be numeric, non-negative, with no blanks.")
+        elif ((revenue > 0) & (pd.to_numeric(df["converted"], errors="coerce") != 1)).any():
+            errors.append("Rows with revenue > 0 must have converted = 1.")
     if "pre_period_covariate" in df.columns and pd.to_numeric(
         df["pre_period_covariate"], errors="coerce"
     ).isna().any():
@@ -102,9 +125,11 @@ def ingest_upload(
     Writes a validated upload (see validate_upload) into the schema as one
     experiment. Pure database code, testable without Streamlit.
 
-    treatment_split is the INTENDED allocation, stored in variants.split_pct
-    for the SRM check. It used to be hard-coded to 0.5, so a real 90/10
-    design was falsely flagged as SRM (review issue M3).
+    treatment_split is the INTENDED share of users across ALL treatment
+    arms, split equally between arms; control gets the rest. Stored in
+    variants.split_pct for the SRM check (it used to be hard-coded to 0.5,
+    so a real 90/10 design was falsely flagged as SRM — review issue M3).
+    Arms come from the variant_id naming convention (see arm_name()).
 
     Stored user_ids are prefixed with experiment_id: the session DB
     persists across uploads, so a second upload reusing the same ids
@@ -127,13 +152,22 @@ def ingest_upload(
     # Whatever prefix the uploaded file's variant_id values originally had
     # doesn't need to match experiment_id — every downstream query filters
     # by the assignments table's own experiment_id column.
-    control_variant_id = f"{experiment_id}_control"
-    treatment_variant_id = f"{experiment_id}_treatment"
-    df["variant_id"] = [
-        control_variant_id if str(v).endswith("_control") else treatment_variant_id
-        for v in df["variant_id"]
-    ]
+    df["variant_name"] = [arm_name(str(v)) for v in df["variant_id"]]
+    df["variant_id"] = [f"{experiment_id}_{name}" for name in df["variant_name"]]
+    arms = sorted(set(df["variant_name"]) - {"control"})
+    variants = pd.DataFrame(
+        [{"variant_id": f"{experiment_id}_control", "experiment_id": experiment_id,
+          "name": "control", "split_pct": 1 - treatment_split}]
+        + [{"variant_id": f"{experiment_id}_{arm}", "experiment_id": experiment_id,
+            "name": arm, "split_pct": treatment_split / len(arms)} for arm in arms]
+    )
     df["converted"] = pd.to_numeric(df["converted"]).astype(int)
+    # Per-user revenue becomes the value of that user's conversion event;
+    # without a revenue column every conversion is worth 1.0 (as before).
+    df["revenue"] = (
+        pd.to_numeric(df["revenue"]) if "revenue" in df.columns
+        else df["converted"].astype(float)
+    )
 
     users = pd.DataFrame({
         "user_id": df["user_id"],
@@ -151,14 +185,15 @@ def ingest_upload(
         "variant_id": df["variant_id"],
         "assigned_at": "2025-01-01",
     })
-    converted_ids = df.loc[df["converted"] == 1, "user_id"].reset_index(drop=True)
+    converters = df.loc[df["converted"] == 1].reset_index(drop=True)
+    converted_ids = converters["user_id"]
     events = pd.DataFrame({
         "event_id": [f"ev_{experiment_id}_{i:07d}" for i in range(len(converted_ids))],
         "user_id": converted_ids,
         "experiment_id": experiment_id,
         "event_type": "conversion",
         "event_timestamp": "2025-01-02",
-        "value": 1.0,
+        "value": converters["revenue"].astype(float),
     })
 
     with engine.begin() as conn:
@@ -166,13 +201,7 @@ def ingest_upload(
             "INSERT INTO experiments (experiment_id, name, start_date, status) "
             "VALUES (:eid, 'Uploaded dataset', '2025-01-01', 'analyzed')"
         ), {"eid": experiment_id})
-        conn.execute(text(
-            "INSERT INTO variants (variant_id, experiment_id, name, split_pct) VALUES "
-            "(:cvid, :eid, 'control', :cpct), (:tvid, :eid, 'treatment', :tpct)"
-        ), {
-            "cvid": control_variant_id, "tvid": treatment_variant_id, "eid": experiment_id,
-            "cpct": 1 - treatment_split, "tpct": treatment_split,
-        })
+        variants.to_sql("variants", conn, if_exists="append", index=False)
         users.to_sql("users", conn, if_exists="append", index=False)
         assignments.to_sql("assignments", conn, if_exists="append", index=False)
         events.to_sql("events", conn, if_exists="append", index=False)
@@ -216,6 +245,24 @@ def render_generate_data_form() -> str | None:
             min_value=0.30, max_value=0.70, value=0.45, step=0.01,
         ) if simulate_srm_bug else None
 
+        add_arm_b = st.checkbox("Add a second treatment arm (treatment_b)", value=False)
+        arm_b_effect = st.slider(
+            "True effect of treatment_b (if added)",
+            min_value=-0.20, max_value=0.20, value=0.0, step=0.005,
+        )
+
+        col3, col4 = st.columns(2)
+        with col3:
+            revenue_mean = st.number_input(
+                "Average order value (0 = conversions only, no revenue)",
+                min_value=0.0, value=50.0, step=5.0,
+            )
+        with col4:
+            revenue_lift = st.slider(
+                "Treatment lift in order value", min_value=-0.5, max_value=0.5,
+                value=0.0, step=0.01,
+            )
+
         submitted = st.form_submit_button("Generate data")
 
     if not submitted:
@@ -227,7 +274,14 @@ def render_generate_data_form() -> str | None:
         "true_effect": float(true_effect),
         "covariate_correlation": float(covariate_correlation),
         "seed": int(seed),
-        "corrupted_split": corrupted_split,
+        "revenue_mean": float(revenue_mean) if revenue_mean > 0 else None,
+        "revenue_lift": float(revenue_lift),
+        "treatment_arms": (
+            {"treatment": float(true_effect), "treatment_b": float(arm_b_effect)}
+            if add_arm_b else None
+        ),
+        # The SRM-bug knob is two-arm only.
+        "corrupted_split": corrupted_split if not add_arm_b else None,
     }}
 
     # seed_database() derives its OWN experiment_id from the seed
@@ -253,9 +307,11 @@ def render_upload_form() -> str | None:
     st.caption(
         f"CSV must have one row per user, with columns: "
         f"{', '.join(REQUIRED_CSV_COLUMNS)} (required), plus optionally "
-        f"user_id, pre_period_covariate (needed for CUPED) and/or "
+        f"user_id, revenue (per-user, for revenue metrics), pre_period_covariate "
+        f"(needed for CUPED) and/or "
         f"{', '.join(OPTIONAL_SEGMENT_COLUMNS)} (for segment analysis). "
-        f"variant_id values must end in '_control' or '_treatment'."
+        f"variant_id values must end in '_control' or contain '_treatment' "
+        f"(e.g. '_treatment', '_treatment_b' for extra arms)."
     )
 
     treatment_split = st.number_input(

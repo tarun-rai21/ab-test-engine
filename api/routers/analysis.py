@@ -2,30 +2,25 @@
 api/routers/analysis.py — POST /experiments/{id}/analyze and
 GET /experiments/{id}/report.
 
-KNOWN SPEC DEVIATION, documented here rather than silently worked around:
-the original spec describes GET /report as served "from experiment_results
-without recomputation." The current experiment_results schema (Phase 0)
-only stores point_estimate, ci_lower, ci_upper, method, and trusted — it
-does not store p_value, standard_error, degrees_freedom, n_control/
-n_treatment, or CUPED's variance_reduction_pct. A full AnalysisReport
-genuinely cannot be reconstructed from what's persisted today.
+POST /analyze runs the full pipeline and PERSISTS it: per-comparison rows
+in experiment_results (including p-value, standard error, degrees of
+freedom and arm sizes) and the complete report, with the parameters that
+produced it, in analysis_reports.
 
-Rather than either (a) silently returning an incomplete report that LOOKS
-complete, or (b) extending the schema and persistence layer as scope creep
-inside what's supposed to be a thin API wrapper (Phase 7) around already-
-tested Phase 3 code — GET /report here RECOMPUTES via
-analyze_experiment(..., persist=False), giving a genuinely complete,
-correct report at the cost of not matching the spec's literal wording.
-Extending the schema to truly avoid recomputation remains a legitimate
-future improvement, out of scope for this phase.
+GET /report serves that stored report WITHOUT recomputation, as the
+original spec describes. It used to re-run the analysis because the schema
+could not hold a full report; it returns 404 for a metric that has never
+been analysed, rather than silently computing a fresh one with default
+settings that may differ from the analysis the caller ran.
 """
 
 from __future__ import annotations
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Response
 from sqlalchemy import text
 
 from api.schemas import AnalysisReportSchema, AnalyzeRequest
+from core.data_access import get_stored_report
 from core.pipeline import analyze_experiment
 from db.connection import get_engine
 
@@ -61,6 +56,7 @@ def analyze(experiment_id: str, request: AnalyzeRequest) -> AnalysisReportSchema
             n_checkpoints_planned=request.n_checkpoints_planned,
             checkpoint_n=request.checkpoint_n,
             spending=request.spending,
+            winsorize_quantile=request.winsorize_quantile,
             segment_columns=request.segment_columns,
             persist=True,
         )
@@ -76,29 +72,25 @@ def analyze(experiment_id: str, request: AnalyzeRequest) -> AnalysisReportSchema
 @router.get("/{experiment_id}/report", response_model=AnalysisReportSchema)
 def get_report(
     experiment_id: str,
+    response: Response,
     metric: str = "conversion",
-    use_cuped: bool = True,
 ) -> AnalysisReportSchema:
     """
-    Returns a full analysis report WITHOUT persisting anything new
-    (persist=False) — see this file's module docstring for why this
-    recomputes rather than reading purely from experiment_results, and
-    what a true no-recomputation implementation would require.
-
-    segment_columns/sequential-check parameters are intentionally NOT
-    exposed here (unlike POST /analyze) — this endpoint is meant for a
-    quick "what does this experiment look like right now" read, not a
-    full reconfigurable analysis; callers wanting segment or sequential
-    detail should use POST /analyze directly.
+    Returns the report stored by the latest POST /analyze for this metric,
+    exactly as that call returned it. Nothing is recomputed or written.
+    The X-Report-Computed-At header says when the analysis ran.
     """
     engine = get_engine()
     _require_experiment_exists(engine, experiment_id)
 
-    try:
-        report = analyze_experiment(
-            engine, experiment_id, metric_name=metric, use_cuped=use_cuped, persist=False
+    stored = get_stored_report(engine, experiment_id, metric)
+    if stored is None:
+        raise HTTPException(
+            status_code=404,
+            detail=(
+                f"No stored report for experiment {experiment_id!r}, metric {metric!r}. "
+                f"Run POST /experiments/{experiment_id}/analyze first."
+            ),
         )
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-
-    return AnalysisReportSchema.model_validate(report)
+    response.headers["X-Report-Computed-At"] = stored["computed_at"]
+    return AnalysisReportSchema.model_validate(stored["report"])
