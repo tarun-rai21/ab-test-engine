@@ -45,6 +45,7 @@ CONFIG_PATH = Path(__file__).resolve().parent.parent / "config" / "default_confi
 # insertion-order comment below: get it right on principle, don't rely on the
 # DB to catch what it isn't checking for).
 _DELETE_ORDER = [
+    "analysis_reports",
     "srm_checks",
     "sequential_checkpoints",
     "experiment_results",

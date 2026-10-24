@@ -106,6 +106,11 @@ def init_schema(engine: Engine | None = None) -> None:
 _COLUMN_MIGRATIONS: tuple[tuple[str, str, str], ...] = (
     ("experiments", "n_checkpoints_planned", "INTEGER"),
     ("experiments", "checkpoint_n", "INTEGER"),
+    ("experiment_results", "p_value", "REAL"),
+    ("experiment_results", "standard_error", "REAL"),
+    ("experiment_results", "degrees_freedom", "REAL"),
+    ("experiment_results", "n_control", "INTEGER"),
+    ("experiment_results", "n_treatment", "INTEGER"),
 )
 
 

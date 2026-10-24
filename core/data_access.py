@@ -12,6 +12,8 @@ bug in the other; each has been proven correct independently.
 
 from __future__ import annotations
 
+import json
+
 import pandas as pd
 from sqlalchemy import Engine, text
 
@@ -310,3 +312,29 @@ def save_planned_schedule(
         })
     if result.rowcount == 0:
         raise ValueError(f"No experiment found with experiment_id={experiment_id!r}.")
+
+
+def get_stored_report(engine: Engine, experiment_id: str, metric_name: str) -> dict | None:
+    """
+    Returns the latest persisted report for (experiment, metric) as
+    {"report": ..., "parameters": ..., "computed_at": ...}, or None if that
+    metric has never been analysed with persist=True.
+    """
+    query = text(
+        """
+        SELECT report_json, parameters_json, computed_at
+        FROM analysis_reports
+        WHERE experiment_id = :experiment_id AND metric_name = :metric_name
+        """
+    )
+    with engine.connect() as conn:
+        row = conn.execute(
+            query, {"experiment_id": experiment_id, "metric_name": metric_name}
+        ).fetchone()
+    if row is None:
+        return None
+    return {
+        "report": json.loads(row.report_json),
+        "parameters": json.loads(row.parameters_json),
+        "computed_at": str(row.computed_at),
+    }

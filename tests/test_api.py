@@ -235,11 +235,8 @@ def test_analyze_nonexistent_experiment_returns_404(client):
 
 def test_report_matches_analyze_and_does_not_double_persist(client):
     """
-    Proves the specific design decision documented in
-    api/routers/analysis.py's module docstring: GET /report recomputes via
-    persist=False and must NOT write additional rows to experiment_results
-    beyond what POST /analyze already persisted, even though it returns an
-    equally complete report.
+    GET /report serves the report stored by POST /analyze — identical
+    content — and writes nothing (no extra experiment_results rows).
     """
     experiment_id = _create_experiment(client)
     _assign(client, experiment_id)
@@ -341,3 +338,53 @@ def test_planned_schedule_can_be_stored_and_drives_the_peeking_check(client):
         json={"n_checkpoints_planned": 5, "checkpoint_n": 200},
     )
     assert missing.status_code == 404
+
+
+def test_report_is_read_from_storage_not_recomputed(client):
+    """
+    GET /report must return the STORED analysis — including options such
+    as segment columns that a recomputation with defaults would drop — and
+    404 for a metric that was never analysed.
+    """
+    experiment_id = _create_experiment(client)
+    _assign(client, experiment_id)
+
+    missing = client.get(f"/experiments/{experiment_id}/report")
+    assert missing.status_code == 404
+    assert "POST" in missing.json()["detail"]
+
+    analyzed = client.post(
+        f"/experiments/{experiment_id}/analyze",
+        json={"segment_columns": ["device_type"], "use_cuped": False},
+    ).json()
+    report = client.get(f"/experiments/{experiment_id}/report")
+    assert report.status_code == 200
+    assert report.json() == analyzed
+    assert report.json()["segments"] is not None and report.json()["cuped_effect"] is None
+    assert report.headers["X-Report-Computed-At"]
+
+    # Change the underlying data: the stored report must NOT change until
+    # the experiment is re-analysed.
+    engine = get_engine()
+    with engine.begin() as conn:
+        conn.execute(text("DELETE FROM events WHERE experiment_id = :eid"), {"eid": experiment_id})
+    assert client.get(f"/experiments/{experiment_id}/report").json() == analyzed
+
+    other_metric = client.get(f"/experiments/{experiment_id}/report?metric=revenue_per_user")
+    assert other_metric.status_code == 404
+
+
+def test_persisted_results_include_test_statistics(client):
+    experiment_id = _create_experiment(client)
+    _assign(client, experiment_id)
+    report = client.post(f"/experiments/{experiment_id}/analyze", json={}).json()
+
+    with get_engine().connect() as conn:
+        row = conn.execute(text(
+            "SELECT p_value, standard_error, degrees_freedom, n_control, n_treatment "
+            "FROM experiment_results WHERE experiment_id = :eid AND method = 'raw_ttest'"
+        ), {"eid": experiment_id}).fetchone()
+    raw = report["raw_effect"]
+    assert row.p_value == pytest.approx(raw["p_value"])
+    assert row.standard_error == pytest.approx(raw["standard_error"])
+    assert row.n_control + row.n_treatment == raw["n_control"] + raw["n_treatment"]

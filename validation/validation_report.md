@@ -62,7 +62,31 @@ look), whose exact type-I error is ~6.9%. It measured 6.6% at 500
 simulations — too few to distinguish 5% from 7% — and was accepted against
 a band widened to 7.5%. See `docs/REVIEW.md` issue H2.
 
-## 4. Segment Recovery
+## 4. Revenue Metrics
+
+**Configuration:** n=4000, baseline 0.20, conversion effect +0.02, order
+values log-normal (σ=1) with mean 50 and +10% treatment lift, 500
+simulations each.
+
+| Metric | Estimator | True effect | Coverage |
+|---|---|---|---|
+| revenue_per_conversion | delta method | +5.00 | **94.8%** (474/500) |
+| revenue_per_user | Welch | +2.10 | **95.2%** (476/500) |
+
+## 5. Multi-Arm Family-Wise Error
+
+Three treatment arms with no real effect, 2000 per arm, 2000 simulations:
+unadjusted "any arm significant" rate **13.05%**; with Holm adjustment
+**4.45%**.
+
+## 6. Segment Heterogeneity (Cochran's Q)
+
+| Scenario | Rejection rate | Expected |
+|---|---|---|
+| Same effect in every region (1000 sims) | **4.60%** | 5% |
+| Device effects ±0.04 (200 sims) | **88.5%** | ~87% theoretical power |
+
+## 7. Segment Recovery
 
 **Configuration:** n=20000, baseline=0.10, segment deltas mobile +0.15 /
 desktop −0.08, covariate correlation 0 (no clipping).
@@ -72,7 +96,7 @@ tolerance and with the correct sign; the effect-reversal flag fires on
 desktop (significant and opposite to the positive pooled effect) and not on
 mobile.
 
-## 5. Known Limitations
+## 8. Known Limitations
 
 - The index-based O'Brien-Fleming schedule is exact only for **equally
   spaced** looks. The Lan-DeMets boundary (the default for live checks)

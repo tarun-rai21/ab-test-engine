@@ -65,7 +65,7 @@ DESIGN DECISIONS, made explicit here rather than left implicit in code:
 
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
+from dataclasses import asdict, dataclass, replace
 
 import pandas as pd
 from sqlalchemy import Engine
@@ -86,7 +86,7 @@ from core.metrics import (
     winsorization_cap,
 )
 from core.multiple_testing import holm_adjust
-from core.persistence import persist_inference_result, persist_srm_result
+from core.persistence import persist_inference_result, persist_report, persist_srm_result
 from core.segments import SegmentAnalysisResult, apply_global_bh, segment_breakdown
 from core.sequential import SequentialCheckResult, sequential_check
 from core.validity import SRMResult, achievable_mde_from_se, mde_curve, srm_check
@@ -322,7 +322,7 @@ def analyze_experiment(
     )
     primary = comparisons[0]
 
-    return AnalysisReport(
+    report = AnalysisReport(
         experiment_id=experiment_id,
         metric_name=metric_name,
         srm=srm_result,
@@ -335,3 +335,18 @@ def analyze_experiment(
         winsorization_cap=cap,
         comparisons=comparisons,
     )
+
+    if persist:
+        persist_report(
+            engine, experiment_id, metric_name, asdict(report),
+            parameters={
+                "use_cuped": use_cuped,
+                "segment_columns": list(segment_columns or []),
+                "n_checkpoints_planned": n_checkpoints_planned,
+                "checkpoint_n": checkpoint_n,
+                "spending": spending,
+                "winsorize_quantile": winsorize_quantile,
+            },
+        )
+
+    return report
