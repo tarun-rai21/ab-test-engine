@@ -111,6 +111,9 @@ _COLUMN_MIGRATIONS: tuple[tuple[str, str, str], ...] = (
     ("experiment_results", "degrees_freedom", "REAL"),
     ("experiment_results", "n_control", "INTEGER"),
     ("experiment_results", "n_treatment", "INTEGER"),
+    ("sequential_checkpoints", "metric_name", "TEXT"),
+    ("sequential_checkpoints", "treatment_arm", "TEXT"),
+    ("sequential_checkpoints", "planned_total_n", "INTEGER"),
 )
 
 

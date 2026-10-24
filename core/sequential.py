@@ -48,6 +48,9 @@ class SequentialCheckResult:
     beyond_plan: bool = False      # True = latest look is past the planned final sample size
     spending: str = "lan_demets"   # "lan_demets" (information-based) | "obrien_fleming" (index)
     information_fraction: float | None = None  # latest cumulative_n / planned total
+    treatment_arm: str | None = None  # which arm-vs-control comparison was monitored
+    metric_name: str | None = None
+    replanned: bool = False  # True = some past looks were made under a different plan
 
 
 def _obf_crossing_probability(c: float, n_checkpoints: int, grid_step: float = 0.005) -> float:
@@ -142,6 +145,7 @@ def lan_demets_boundary(
     information_fractions: Sequence[float],
     total_alpha: float = 0.05,
     grid_step: float = 0.001,
+    fixed_thresholds: Sequence[float | None] | None = None,
 ) -> tuple[float, ...]:
     """
     Nominal two-sided p-value thresholds for looks taken at the given
@@ -166,6 +170,17 @@ def lan_demets_boundary(
     (z = 4.877, 3.357, 2.680, 2.290, 2.031) in tests/test_sequential.py.
     Looks past t = 1 have nothing left to spend and get threshold 0.0
     (they can never reject).
+
+    fixed_thresholds (optional, one entry per look, None = compute): looks
+    whose boundary was ALREADY USED under an earlier plan keep that exact
+    recorded threshold. The recursion measures the alpha those looks
+    actually spent and later looks spend alpha(t) minus that amount, with
+    t measured against the CURRENT planned total — the standard Lan-DeMets
+    way to change the planned sample size mid-test without rewriting
+    history or exceeding total_alpha. If the plan grew so much that the
+    spending function has not yet caught up with what was spent, the next
+    looks get threshold 0 until it does. With no fixed looks the result is
+    exactly as before.
     """
     fractions = [float(t) for t in information_fractions]
     if not fractions:
@@ -176,11 +191,12 @@ def lan_demets_boundary(
         )
     if not (0.0 < total_alpha < 1.0):
         raise ValueError(f"total_alpha must be in (0,1), got {total_alpha}")
-
-    spent = [lan_demets_obf_spending(t, total_alpha) for t in fractions]
-    increments = np.diff([0.0] + spent)
+    fixed = list(fixed_thresholds) if fixed_thresholds is not None else [None] * len(fractions)
+    if len(fixed) != len(fractions):
+        raise ValueError("fixed_thresholds must have one entry per look")
 
     thresholds: list[float] = []
+    spent_so_far = 0.0
     # Grid on the W scale, symmetric about 0: x = h * (-n..n).
     h = grid_step
     n = int(np.ceil(8 * np.sqrt(fractions[0]) / h))
@@ -198,10 +214,33 @@ def lan_demets_boundary(
             x = h * np.arange(-n, n + 1)
             previous_t = t
 
-        increment = increments[k]
+        # Mass strictly inside |W| < x_j, accumulated outward from the centre.
+        centre = n
+        pair_mass = density[centre + 1:] + density[centre - 1::-1]
+        inside = (density[centre] + np.concatenate([[0.0], np.cumsum(pair_mass)])) * h
+
+        if fixed[k] is not None:
+            # Boundary already used at this look: keep it, and book the
+            # alpha it actually spent given the earlier looks.
+            threshold = float(fixed[k])
+            thresholds.append(threshold)
+            if threshold <= 0.0:
+                continue  # could never reject: spends nothing, cuts nothing
+            c = norm.isf(threshold / 2) * np.sqrt(t)
+            if k == 0:
+                spent_so_far += threshold  # W(t_1) is exactly N(0, t_1)
+            else:
+                radius = min(int(c / h), len(inside) - 1)
+                spent_so_far += float(max(0.0, inside[-1] - inside[radius]))
+            density[np.abs(x) >= c] = 0.0
+            continue
+
+        target_spent = lan_demets_obf_spending(t, total_alpha)
+        increment = target_spent - spent_so_far
         if increment <= 0.0:
             thresholds.append(0.0)  # nothing left to spend: this look cannot reject
             continue
+        spent_so_far = target_spent
 
         if k == 0:
             # First look: W(t_1) ~ N(0, t_1), so the boundary is closed-form.
@@ -210,10 +249,6 @@ def lan_demets_boundary(
             density[np.abs(x) >= z_1 * np.sqrt(t)] = 0.0
             continue
 
-        # Mass strictly inside |W| < x_j, accumulated outward from the centre.
-        centre = n
-        pair_mass = density[centre + 1:] + density[centre - 1::-1]
-        inside = (density[centre] + np.concatenate([[0.0], np.cumsum(pair_mass)])) * h
         target_inside = inside[-1] - increment
         j = int(np.searchsorted(inside, target_inside))
         if j >= len(inside):
@@ -403,7 +438,9 @@ def sequential_check(
       - "lan_demets" (default): information-based. Every stored look's
         information fraction t = cumulative_n / (n_checkpoints_planned *
         checkpoint_n) feeds lan_demets_boundary(), so irregular or
-        unplanned look times are handled correctly.
+        unplanned look times are handled correctly. If the plan changed
+        mid-test, looks recorded under the old plan (planned_total_n on the
+        row) keep the threshold that was actually used.
       - "obrien_fleming": the classical index-based schedule from
         alpha_spending_schedule(), mapping the latest look to its nearest
         planned position. Exact only when looks follow the planned equal
@@ -435,9 +472,27 @@ def sequential_check(
     planned_total_n = n_checkpoints_planned * checkpoint_n
     information_fraction = latest_n / planned_total_n
 
+    replanned = False
     if spending == "lan_demets":
-        look_ns = sorted({c["cumulative_n"] for c in checkpoints})
-        thresholds = lan_demets_boundary([n / planned_total_n for n in look_ns], total_alpha)
+        # One look per distinct sample size (the latest-logged row wins).
+        by_n = {c["cumulative_n"]: c for c in checkpoints}
+        look_ns = sorted(by_n)
+        # Looks whose threshold was set under a DIFFERENT planned total keep
+        # that recorded threshold (it was the rule actually in force); the
+        # rest are computed under the current plan. See lan_demets_boundary.
+        fixed: list[float | None] = []
+        for n in look_ns[:-1]:
+            row = by_n[n]
+            recorded_plan = row.get("planned_total_n")
+            if recorded_plan is not None and recorded_plan != planned_total_n:
+                fixed.append(row["alpha_threshold_at_check"])
+                replanned = True
+            else:
+                fixed.append(None)
+        thresholds = lan_demets_boundary(
+            [n / planned_total_n for n in look_ns], total_alpha,
+            fixed_thresholds=fixed + [None],
+        )
         corrected_threshold = thresholds[-1]
         # Information-based: any look past the planned total is beyond plan.
         beyond_plan = latest_n > planned_total_n
@@ -463,6 +518,7 @@ def sequential_check(
         beyond_plan=beyond_plan,
         spending=spending,
         information_fraction=information_fraction,
+        replanned=replanned,
     )
 
 

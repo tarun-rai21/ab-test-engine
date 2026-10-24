@@ -111,6 +111,7 @@ class ExperimentSimulator:
         revenue_mean: float | None = None,
         revenue_lift: float = 0.0,
         revenue_sigma: float = 1.0,
+        revenue_covariate_effect: float = 0.0,
         treatment_arms: dict[str, float] | None = None,
         allocation: dict[str, float] | None = None,
     ):
@@ -168,6 +169,7 @@ class ExperimentSimulator:
         self.revenue_mean = revenue_mean
         self.revenue_lift = revenue_lift
         self.revenue_sigma = revenue_sigma
+        self.revenue_covariate_effect = revenue_covariate_effect
         self.arm_effects = dict(sorted(arm_effects.items()))
         self.allocation = allocation
 
@@ -210,7 +212,9 @@ class ExperimentSimulator:
         }
 
         assignments_df = self._build_assignments(users_df["user_id"], variant)
-        order_values = self._order_values(rng, converted, is_treatment)
+        order_values = self._order_values(
+            rng, converted, is_treatment, users_df["pre_period_covariate"].to_numpy()
+        )
         events_df = self._build_events(users_df["user_id"], converted, order_values)
 
         ground_truth = GroundTruth(
@@ -463,7 +467,11 @@ class ExperimentSimulator:
         })
 
     def _order_values(
-        self, rng: np.random.Generator, converted: np.ndarray, is_treatment: np.ndarray
+        self,
+        rng: np.random.Generator,
+        converted: np.ndarray,
+        is_treatment: np.ndarray,
+        covariate: np.ndarray,
     ) -> np.ndarray:
         """
         Order value for each user (only meaningful where converted == 1).
@@ -479,6 +487,17 @@ class ExperimentSimulator:
             return np.ones(self.n_users)
         treatment_mean = self.revenue_mean * (1 + self.revenue_lift)
         means = np.where(is_treatment, treatment_mean, self.revenue_mean)
+        if self.revenue_covariate_effect:
+            # Users with a higher pre-period covariate place larger orders,
+            # so the covariate can reduce order-value noise (CUPED for the
+            # ratio metric). The covariate is log-normal, so w = log(x) /
+            # sigma is exactly N(0, 1) and exp(g*w - g^2/2) has mean exactly
+            # 1: configured average order values still hold. (Tilting on the
+            # standardized raw covariate instead lets its extreme right tail
+            # dominate — a few users would absorb almost all the revenue.)
+            g = self.revenue_covariate_effect
+            w = np.log(covariate) / _COVARIATE_LOGNORMAL_SIGMA
+            means = means * np.exp(g * w - g**2 / 2)
         mu = np.log(means) - self.revenue_sigma**2 / 2
         return rng.lognormal(mean=mu, sigma=self.revenue_sigma)
 

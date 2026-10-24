@@ -72,12 +72,14 @@ simulations each.
 |---|---|---|---|
 | revenue_per_conversion | delta method | +5.00 | **94.8%** (474/500) |
 | revenue_per_user | Welch | +2.10 | **95.2%** (476/500) |
+| revenue_per_conversion | CUPED on the delta-method linearization (order values tied to the covariate, effect 1.0) | +5.00 | **95.4%** (477/500), mean variance reduction 6.4% |
 
 ## 5. Multi-Arm Family-Wise Error
 
 Three treatment arms with no real effect, 2000 per arm, 2000 simulations:
 unadjusted "any arm significant" rate **13.05%**; with Holm adjustment
-**4.45%**.
+**4.45%**; with step-down Dunnett (the default) **4.75%** — controlled, and
+closer to nominal because it uses the shared-control correlation.
 
 ## 6. Segment Heterogeneity (Cochran's Q)
 

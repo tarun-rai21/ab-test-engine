@@ -41,6 +41,20 @@ check — several minutes):
 pytest validation/ -v -s -m slow --tb=short
 ```
 
+## Running with Docker
+
+```bash
+cp .env.example .env          # optionally set API_KEY and APP_PASSWORD
+docker compose up --build
+```
+
+- API on http://localhost:8000 (docs at `/docs`, health at `/health`).
+  With `API_KEY` set, every data endpoint requires an `X-API-Key` header.
+- Streamlit on http://localhost:8501. With `APP_PASSWORD` set, it asks for
+  the password once per browser session.
+- The API's SQLite database lives in the `ab-data` volume. Both containers
+  run as an unprivileged user.
+
 ## Why this exists
 
 Naive `p < 0.05` A/B testing fails in four specific, well-documented ways:
@@ -174,7 +188,8 @@ Measured by actually running `validation/*.py`, not asserted — see
 | Lan-DeMets FPR, irregular spacing | 5% (band 3.5%–7%) | **5.05%** (101/2000) | Calibrated to each look's actual information fraction, not assumed to be equal. |
 | Revenue per conversion CI coverage (delta method) | 93%–97% | **94.8%** (474/500) | Log-normal order values (σ=1), n=4000. |
 | Revenue per user CI coverage | 93%–97% | **95.2%** (476/500) | Same heavy-tailed order values. |
-| Multi-arm family-wise error (3 null arms) | ≤5% | **4.45%** Holm vs **13.05%** unadjusted | 2000 sims, shared control. |
+| Revenue per conversion CI coverage, CUPED | 93%–97% | **95.4%** (477/500) | Order values tied to the covariate; 6.4% mean variance reduction. |
+| Multi-arm family-wise error (3 null arms) | ≤5% | **4.75%** Dunnett, **4.45%** Holm, **13.05%** unadjusted | 2000 sims, shared control. |
 | Segment heterogeneity (Q test), homogeneous effect | ~5% | **4.60%** | 1000 sims, region segments. |
 | Segment heterogeneity (Q test), real difference | ~87% (theory) | **88.5%** | 200 sims, device-type effects ±0.04. |
 | Segment recovery (deliberately heterogeneous) | Correct sign, magnitude within noise | **Mobile: +0.147** (configured +0.15); **Desktop: -0.070** (configured -0.08) | Effect-reversal flag correctly fired on the significantly opposite segment. |
@@ -195,11 +210,14 @@ and fixed.
 - **Metrics:** `conversion` (Welch t-test), `revenue_per_user` (Welch,
   optional winsorization at a pooled quantile, CUPED-eligible) and
   `revenue_per_conversion` (average order value — a ratio metric, analysed
-  with the delta method at the user level). Select with
+  with the delta method at the user level, with CUPED applied to its
+  per-user linearization). Select with
   `analyze_experiment(metric_name=...)` or the API's `metric` field.
 - **A/B/n experiments:** any number of treatment arms. Each arm is compared
-  with control; Holm-adjusted p-values control the family-wise error rate
-  across arms (`AnalysisReport.comparisons`).
+  with control; step-down Dunnett-adjusted p-values (built from each
+  comparison's own standard error and the shared-control correlation)
+  control the family-wise error rate across arms, with Holm as an option
+  (`multiple_comparison=`, `AnalysisReport.comparisons`).
 - **Segment heterogeneity:** Cochran's Q test of whether segment effects
   differ, and one Benjamini-Hochberg correction across every segment, column
   and arm in a report.
@@ -207,27 +225,40 @@ and fixed.
   the experiment (`PUT /experiments/{id}/schedule`), and `GET /report`
   serves the stored result of the latest `POST /analyze` without
   recomputation.
+- **Real data:** `POST /experiments/{id}/ingest` (JSON rows) and the
+  Streamlit CSV upload share `core/ingestion.py`: map the file's own column
+  names onto variant / converted / revenue / user id / covariate / segment
+  roles, map raw variant labels (e.g. "A"/"B") onto control and arms or
+  drop them, and read conversion flags written as 0/1, true/false or
+  yes/no.
+- **Sequential monitoring per arm and metric:** each look
+  (`POST /experiments/{id}/checkpoints`, or the app's "Log this checkpoint")
+  is recorded for every treatment arm on a given metric, and the peeking
+  check runs per arm (`AnalysisReport.sequential_risks`). The planned sample
+  size can change mid-test: thresholds already used keep their recorded
+  values and the alpha they spent is carried forward under the new plan.
 
 ## Known limitations (stated directly, not discovered later)
 
 - Live peeking checks use a **Lan-DeMets** boundary (O'Brien-Fleming-type
   spending, α(t) = 4 − 4Φ(z_{α/4}/√t)) driven by each look's information
   fraction, so irregular look times are handled exactly. It matches
-  published `ldbounds` values to ~0.001 in z. It still assumes the
-  **planned total sample size** is fixed up front: looking past it spends
-  nothing (those looks cannot reject), and changing the plan mid-test
-  is not supported. The index-based O'Brien-Fleming schedule remains
+  published `ldbounds` values to ~0.001 in z. A look past the planned
+  total spends nothing (it cannot reject) until the plan is increased; plan
+  changes must not be driven by the observed effect, or the error guarantee
+  no longer holds. The index-based O'Brien-Fleming schedule remains
   available (`spending="obrien_fleming"`) for planned equal spacing.
-- Multi-arm comparisons use Holm, which ignores the correlation created by
-  the shared control group; Dunnett's test would be slightly more powerful.
-  The sequential-peeking check monitors a single stored p-value series per
-  experiment (in the app, the primary arm), not every arm.
+- The multi-arm Dunnett adjustment uses the large-sample normal
+  approximation for the joint distribution of the comparisons. The
+  sequential check corrects for repeated looks within each arm, not jointly
+  across arms.
 - The Cochran's Q heterogeneity test has low power with few or small
   segments; a large p-value is not evidence that effects are equal.
-- CUPED is not applied to the ratio metric.
-- The API's `POST /experiments/{id}/assign` only supports `mode="simulate"`;
-  real-data ingestion (`mode="ingest"`) is deferred to the Streamlit app's
-  upload flow.
-- The Streamlit app's CSV upload requires data already shaped like
-  `get_inference_data()`'s output (one row per user) — it does not
-  reconstruct a full multi-table schema from an arbitrary spreadsheet.
+- Deployment is a single-node setup: SQLite in a volume, one API key
+  rather than per-user accounts, and no TLS termination or rate limiting
+  (put it behind a reverse proxy for that). `DATABASE_URL` can point at
+  Postgres, but the driver is not in `requirements.txt` and the schema is
+  only tested on SQLite.
+- Real data must arrive as one row per user (variant, conversion and
+  optional revenue, covariate and segments); event-level logs need
+  aggregating to users first.

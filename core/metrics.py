@@ -14,8 +14,9 @@ core.data_access.get_inference_data()'s columns:
     the delta method (core.inference.delta_method_ratio_ci), not a t-test
     on individual orders.
 
-Mean metrics support CUPED (an additive per-user adjustment); the ratio
-metric does not, so CUPED is skipped for it.
+Mean metrics support CUPED directly (an additive per-user adjustment); the
+ratio metric gets CUPED through the delta method's per-user linearization
+(core.inference.cuped_ratio_ci).
 """
 
 from __future__ import annotations
@@ -23,7 +24,12 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
-from core.inference import InferenceResult, delta_method_ratio_ci, raw_ttest_ci
+from core.inference import (
+    InferenceResult,
+    delta_method_ratio_ci,
+    delta_ratio_variance,
+    raw_ttest_ci,
+)
 
 METRICS = ("conversion", "revenue_per_user", "revenue_per_conversion")
 MEAN_METRICS = ("conversion", "revenue_per_user")
@@ -81,3 +87,33 @@ def estimate_effect(
         metric_outcome(treatment_df, metric, cap),
         alpha=alpha,
     )
+
+
+def control_mean_variance(control_df: pd.DataFrame, metric: str, cap: float | None = None) -> float:
+    """
+    Variance of the CONTROL arm's estimate of `metric` (s^2 / n for mean
+    metrics, the delta-method variance for the ratio metric). Every
+    treatment-vs-control comparison shares this term, which is what
+    correlates them for core.multiple_testing.dunnett_adjust().
+    """
+    validate_metric(metric)
+    if metric == "revenue_per_conversion":
+        return delta_ratio_variance(
+            control_df["revenue"].to_numpy(dtype=float),
+            control_df["n_conversions"].to_numpy(dtype=float),
+        )[1]
+    values = metric_outcome(control_df, metric, cap)
+    return float(values.var(ddof=1) / len(values))
+
+
+def linearized_ratio(arm_df: pd.DataFrame) -> np.ndarray:
+    """
+    Per-user linearized revenue-per-conversion for one arm:
+    (revenue - R * conversions) / mean(conversions), with R the arm's
+    ratio. Its mean has the ratio's delta-method variance, which is what
+    lets CUPED (and theta estimation) treat the ratio like a mean metric.
+    """
+    revenue = arm_df["revenue"].to_numpy(dtype=float)
+    conversions = arm_df["n_conversions"].to_numpy(dtype=float)
+    ratio = revenue.sum() / conversions.sum()
+    return (revenue - ratio * conversions) / conversions.mean()

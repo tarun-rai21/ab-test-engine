@@ -13,6 +13,8 @@ bug in the other; each has been proven correct independently.
 from __future__ import annotations
 
 import json
+import uuid
+from datetime import datetime, timezone
 
 import pandas as pd
 from sqlalchemy import Engine, text
@@ -225,42 +227,93 @@ def split_by_variant(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
     return control_df, next(iter(arms.values()))
 
 
-def get_sequential_checkpoints(engine: Engine, experiment_id: str) -> list[dict]:
+def get_sequential_checkpoints(
+    engine: Engine,
+    experiment_id: str,
+    metric_name: str | None = None,
+    treatment_arm: str | None = None,
+) -> list[dict]:
     """
-    Returns every stored checkpoint row for this experiment, shaped exactly
-    as core.sequential.sequential_check() expects: a list of dicts, each
-    with 'cumulative_n' and 'p_value_at_check' keys.
+    Returns stored checkpoint rows for this experiment, shaped as
+    core.sequential.sequential_check() expects: dicts with 'cumulative_n',
+    'p_value_at_check', 'alpha_threshold_at_check' and 'planned_total_n'.
 
-    This is the query nothing in the codebase used before Phase 5's
-    orchestration layer (core/pipeline.py) — sequential_check() had only
-    ever been exercised against hand-built dicts in tests, never a real
-    sequential_checkpoints row, a gap explicitly flagged (and left open) in
-    Phase 5's own documentation.
+    metric_name / treatment_arm filter to one monitored comparison. Rows
+    logged before per-metric/per-arm monitoring have NULL in those columns
+    and match any filter, so older checkpoint histories keep working.
 
-    Returns an EMPTY list, not an error, when no checkpoints exist yet.
-    Unlike get_variant_counts/get_inference_data — where zero rows signals a
-    missing or misconfigured experiment — zero sequential_checkpoints rows
-    is the NORMAL state for most experiments (they simply haven't been
-    peeked at yet). Raising here would make the common case an error.
-    Ordered by cumulative_n for readability only; sequential_check() never
-    trusts list order regardless, since it always finds the latest
-    checkpoint explicitly by cumulative_n.
+    Returns an EMPTY list, not an error, when no checkpoints exist yet —
+    the normal state for an experiment that hasn't been peeked at.
     """
     query = text(
         """
-        SELECT cumulative_n, p_value_at_check
+        SELECT cumulative_n, p_value_at_check, alpha_threshold_at_check, planned_total_n
         FROM sequential_checkpoints
         WHERE experiment_id = :experiment_id
-        ORDER BY cumulative_n
+          AND (:metric_name IS NULL OR metric_name IS NULL OR metric_name = :metric_name)
+          AND (:treatment_arm IS NULL OR treatment_arm IS NULL
+               OR treatment_arm = :treatment_arm)
+        ORDER BY cumulative_n, checked_at
         """
     )
     with engine.connect() as conn:
-        rows = conn.execute(query, {"experiment_id": experiment_id}).fetchall()
+        rows = conn.execute(query, {
+            "experiment_id": experiment_id,
+            "metric_name": metric_name,
+            "treatment_arm": treatment_arm,
+        }).fetchall()
 
     return [
-        {"cumulative_n": int(row.cumulative_n), "p_value_at_check": float(row.p_value_at_check)}
+        {
+            "cumulative_n": int(row.cumulative_n),
+            "p_value_at_check": float(row.p_value_at_check),
+            "alpha_threshold_at_check": float(row.alpha_threshold_at_check),
+            "planned_total_n": (
+                int(row.planned_total_n) if row.planned_total_n is not None else None
+            ),
+        }
         for row in rows
     ]
+
+
+def save_checkpoint(
+    engine: Engine,
+    experiment_id: str,
+    cumulative_n: int,
+    p_value: float,
+    alpha_threshold: float,
+    metric_name: str | None = None,
+    treatment_arm: str | None = None,
+    planned_total_n: int | None = None,
+) -> str:
+    """Stores one sequential look. Returns its checkpoint_id."""
+    checkpoint_id = f"cp_{uuid.uuid4().hex[:12]}"
+    with engine.begin() as conn:
+        conn.execute(
+            text(
+                """
+                INSERT INTO sequential_checkpoints
+                    (checkpoint_id, experiment_id, checked_at, cumulative_n,
+                     p_value_at_check, alpha_threshold_at_check,
+                     metric_name, treatment_arm, planned_total_n)
+                VALUES
+                    (:cid, :eid, :checked_at, :cum_n, :pval, :alpha,
+                     :metric, :arm, :planned)
+                """
+            ),
+            {
+                "cid": checkpoint_id,
+                "eid": experiment_id,
+                "checked_at": datetime.now(timezone.utc).isoformat(),
+                "cum_n": cumulative_n,
+                "pval": p_value,
+                "alpha": alpha_threshold,
+                "metric": metric_name,
+                "arm": treatment_arm,
+                "planned": planned_total_n,
+            },
+        )
+    return checkpoint_id
 
 
 def get_planned_schedule(engine: Engine, experiment_id: str) -> tuple[int, int] | None:

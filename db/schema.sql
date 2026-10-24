@@ -90,7 +90,15 @@ CREATE TABLE IF NOT EXISTS sequential_checkpoints (
     checked_at               TIMESTAMP NOT NULL,
     cumulative_n             INTEGER NOT NULL,
     p_value_at_check         REAL NOT NULL,
-    alpha_threshold_at_check REAL NOT NULL
+    alpha_threshold_at_check REAL NOT NULL,
+    -- Which comparison this look tested (NULL on rows logged before
+    -- per-metric/per-arm monitoring: they apply to every metric and arm),
+    -- and the planned total sample size in force when the threshold was
+    -- set (NULL if no plan) — needed to keep past thresholds fixed when
+    -- the plan changes mid-test.
+    metric_name              TEXT,
+    treatment_arm            TEXT,
+    planned_total_n          INTEGER
 );
 
 CREATE TABLE IF NOT EXISTS srm_checks (

@@ -16,6 +16,8 @@ separate, independently-proven piece of this project either way.
 
 from __future__ import annotations
 
+import hmac
+import os
 import sys
 from pathlib import Path
 
@@ -32,9 +34,9 @@ from core.data_access import (
     ALLOWED_SEGMENT_COLUMNS,
     get_inference_data,
     save_planned_schedule,
-    split_arms,
 )
 from core.metrics import METRICS
+from core.monitoring import max_users_per_variant
 from core.pipeline import analyze_experiment
 
 st.set_page_config(page_title="A/B Test Analysis Engine", layout="wide")
@@ -45,6 +47,18 @@ st.caption(
     "SRM detection, CUPED variance reduction, peeking correction, and "
     "effect-reversal-aware segment analysis."
 )
+
+# Optional password gate for a deployed app: set APP_PASSWORD to require
+# it once per browser session; unset (local use), the app is open.
+_app_password = os.environ.get("APP_PASSWORD")
+if _app_password and not st.session_state.get("authenticated"):
+    entered = st.text_input("Password", type="password")
+    if entered and hmac.compare_digest(entered.encode(), _app_password.encode()):
+        st.session_state["authenticated"] = True
+        st.rerun()
+    if entered:
+        st.error("Incorrect password.")
+    st.stop()
 
 # --------------------------------------------------------------------- #
 # 1. Data input
@@ -81,7 +95,10 @@ with col1:
     )
     use_cuped = st.checkbox(
         "Use CUPED variance reduction", value=True,
-        help="Applies to conversion and revenue_per_user (not to ratio metrics).",
+        help=(
+            "Uses the pre-period covariate to reduce variance. For the ratio metric "
+            "it is applied to the delta method's per-user linearization."
+        ),
     )
     winsorize = st.checkbox(
         "Winsorize revenue at the 99th percentile",
@@ -148,21 +165,18 @@ st.divider()
 render_effect_panel(
     report.raw_effect, report.cuped_effect, report.cuped_variance_reduction_pct,
     comparisons=report.comparisons,
+    multiple_comparison=report.multiple_comparison,
 )
 st.divider()
 
-# Checkpoint p-values are logged for the primary comparison (first arm).
-control_df, arm_dfs = split_arms(get_inference_data(get_session_engine(), experiment_id))
-treatment_df = next(iter(arm_dfs.values()))
-
+inference_df = get_inference_data(get_session_engine(), experiment_id)
 render_sequential_panel(
     get_session_engine(),
     experiment_id,
-    report.sequential_risk,
-    control_df=control_df,
-    treatment_df=treatment_df,
+    report.sequential_risks,
+    max_users_per_variant=max_users_per_variant(inference_df),
+    arm_names=[c.treatment_arm for c in report.comparisons],
     metric_name=report.metric_name,
-    winsorization_cap=report.winsorization_cap,
     n_checkpoints_planned=int(n_checkpoints_planned) if enable_sequential else None,
     checkpoint_n=int(checkpoint_n) if enable_sequential else None,
 )

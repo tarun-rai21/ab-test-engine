@@ -25,9 +25,11 @@ from __future__ import annotations
 
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI
+from fastapi import Depends, FastAPI, HTTPException
+from sqlalchemy import text
 
 from api.routers import analysis, experiments
+from api.security import require_api_key
 from db.connection import get_engine, init_schema
 
 
@@ -53,10 +55,23 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-app.include_router(experiments.router)
-app.include_router(analysis.router)
+# Every data endpoint requires the API key when API_KEY is set
+# (api/security.py); "/" and "/health" stay open for load balancers.
+app.include_router(experiments.router, dependencies=[Depends(require_api_key)])
+app.include_router(analysis.router, dependencies=[Depends(require_api_key)])
 
 
 @app.get("/")
 def root() -> dict:
     return {"status": "ok", "docs": "/docs"}
+
+
+@app.get("/health")
+def health() -> dict:
+    """Liveness + readiness: 200 only if the database answers a query."""
+    try:
+        with get_engine().connect() as conn:
+            conn.execute(text("SELECT 1"))
+    except Exception as exc:  # any driver error means "not ready"
+        raise HTTPException(status_code=503, detail=f"database unavailable: {exc}") from exc
+    return {"status": "ok", "database": "ok"}

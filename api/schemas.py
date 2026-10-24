@@ -9,18 +9,16 @@ core.pipeline.AnalysisReport) via e.g. AnalysisReportSchema.model_validate(repor
 — no manual field-by-field copying, and no risk of the API silently drifting
 out of sync with the underlying dataclasses as they evolve.
 
-SCOPE NOTE: the original spec's POST /experiments/{id}/assign describes two
-modes — "simulate" (generate synthetic data) and "ingest" (upload real data).
-Only "simulate" is implemented here. Real-data ingestion needs its own
-CSV-parsing and validation logic that belongs with Phase 8's upload flow, not
-duplicated here — a real, stated scope decision, not a silent gap.
+POST /experiments/{id}/assign generates SIMULATED data; real data goes
+through POST /experiments/{id}/ingest (IngestRequest), which shares
+core.ingestion's column mapping and validation with the Streamlit upload.
 """
 
 from __future__ import annotations
 
-from typing import Literal
+from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import AliasChoices, BaseModel, ConfigDict, Field
 
 # ===================================================================== #
 # POST /experiments
@@ -112,6 +110,8 @@ class AnalyzeRequest(BaseModel):
     # Peeking correction: "lan_demets" (information-based, any look timing)
     # or "obrien_fleming" (index-based, planned equal spacing only).
     spending: Literal["lan_demets", "obrien_fleming"] = "lan_demets"
+    # A/B/n p-value adjustment across arms.
+    multiple_comparison: Literal["dunnett", "holm"] = "dunnett"
 
 
 class SRMResultSchema(BaseModel):
@@ -148,6 +148,9 @@ class SequentialCheckResultSchema(BaseModel):
     beyond_plan: bool
     spending: str
     information_fraction: float | None
+    treatment_arm: str | None = None
+    metric_name: str | None = None
+    replanned: bool = False
     latest_checkpoint_n: int
 
 
@@ -174,9 +177,16 @@ class ArmComparisonSchema(BaseModel):
     model_config = ConfigDict(from_attributes=True)
     treatment_arm: str
     raw_effect: InferenceResultSchema
-    raw_p_value_holm: float
+    # Reports stored before the Dunnett option used *_holm field names;
+    # accept them so GET /report still serves those stored reports.
+    raw_p_value_adjusted: float = Field(
+        validation_alias=AliasChoices("raw_p_value_adjusted", "raw_p_value_holm")
+    )
     cuped_effect: InferenceResultSchema | None
-    cuped_p_value_holm: float | None
+    cuped_p_value_adjusted: float | None = Field(
+        default=None,
+        validation_alias=AliasChoices("cuped_p_value_adjusted", "cuped_p_value_holm"),
+    )
 
 
 class AnalysisReportSchema(BaseModel):
@@ -197,3 +207,49 @@ class AnalysisReportSchema(BaseModel):
     segments: tuple[SegmentAnalysisResultSchema, ...] | None
     winsorization_cap: float | None = None
     comparisons: tuple[ArmComparisonSchema, ...] = ()
+    # Older stored reports predate the option and were always Holm-adjusted.
+    multiple_comparison: str = "holm"
+    sequential_risks: tuple[SequentialCheckResultSchema, ...] = ()
+
+
+# ===================================================================== #
+# POST /experiments/{id}/checkpoints
+# ===================================================================== #
+
+class CheckpointRequest(BaseModel):
+    metric: Literal["conversion", "revenue_per_user", "revenue_per_conversion"] = "conversion"
+
+
+class RecordedLookSchema(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    treatment_arm: str
+    metric_name: str
+    cumulative_n: int
+    p_value: float
+    alpha_threshold: float
+    planned_total_n: int | None
+    corrected_significant: bool
+
+
+# ===================================================================== #
+# POST /experiments/{id}/ingest
+# ===================================================================== #
+
+class IngestRequest(BaseModel):
+    """
+    Real data, one object per user. Without `columns`, rows must use the
+    canonical names (variant_id ending in '_control' / containing
+    '_treatment', converted, optional user_id, revenue,
+    pre_period_covariate, device_type, region, existing_customer). With
+    `columns` ({role: source field}) and optionally `variant_values`
+    ({raw value: variant name or null to drop}), any shape works — see
+    core.ingestion. Variant names must match the experiment's variants.
+    """
+    rows: list[dict[str, Any]] = Field(min_length=1)
+    columns: dict[str, str] | None = None
+    variant_values: dict[str, str | None] | None = None
+
+
+class IngestResponse(BaseModel):
+    n_ingested: int
+    srm_check: SRMCheckSummary

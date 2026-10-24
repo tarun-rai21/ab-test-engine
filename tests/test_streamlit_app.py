@@ -83,7 +83,7 @@ def test_multi_arm_revenue_ratio_metric_with_segments(app):
     _assert_no_failures(app)
     arm_table = next(df.value for df in app.dataframe if "Arm" in df.value.columns)
     assert list(arm_table["Arm"]) == ["treatment", "treatment_b"]
-    assert set(arm_table["Estimator"]) == {"delta_ratio"}
+    assert set(arm_table["Estimator"]) == {"cuped_delta_ratio"}
     segment_headers = [m.value for m in app.markdown if m.value.startswith("**By")]
     assert len(segment_headers) == 2  # one per arm
     assert any("Cochran's Q" in m.value for m in app.markdown)
@@ -113,3 +113,46 @@ def test_peeking_check_logs_checkpoint_and_stores_schedule(app):
         ).fetchone()
     assert checkpoints == 1
     assert tuple(schedule) == (10, 400)
+
+
+def test_column_mapping_widgets_guess_roles_and_variant_meanings():
+    """
+    The upload form's mapping step on a spreadsheet with its own column
+    names and A/B labels (AppTest cannot attach a file, so the mapping
+    widgets are run on their own).
+    """
+    def mapping_page():
+        import pandas as pd
+        import streamlit as st
+
+        from app.components.upload_or_generate import _column_mapping_widgets
+
+        raw = pd.DataFrame({
+            "customer": ["c1", "c2", "c3", "c4"],
+            "bucket": ["A", "B", "A", "B"],
+            "purchased": ["yes", "no", "no", "yes"],
+            "spend": [10.0, 0.0, 0.0, 12.0],
+        })
+        columns, variant_values = _column_mapping_widgets(raw)
+        st.session_state["mapping"] = (columns, variant_values)
+
+    at = AppTest.from_function(mapping_page, default_timeout=TIMEOUT)
+    at.run()
+    assert not at.exception
+    columns, variant_values = at.session_state["mapping"]
+    assert columns == {"variant": "bucket", "converted": "purchased",
+                       "revenue": "spend", "user_id": "customer"}
+    assert variant_values == {"A": "control", "B": "treatment"}
+
+
+def test_password_gate_when_app_password_is_set(monkeypatch):
+    monkeypatch.setenv("APP_PASSWORD", "let-me-in")
+    at = AppTest.from_file(APP_PATH, default_timeout=TIMEOUT)
+    at.run()
+    assert not at.button  # nothing usable before signing in
+
+    at.text_input[0].input("wrong").run()
+    assert any("Incorrect password" in e.value for e in at.error)
+
+    at.text_input[0].input("let-me-in").run()
+    assert any(b.label == "Generate data" for b in at.button)
