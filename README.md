@@ -211,21 +211,27 @@ and fixed.
   the experiment (`PUT /experiments/{id}/schedule`), and `GET /report`
   serves the stored result of the latest `POST /analyze` without
   recomputation.
+- **Sequential monitoring per arm and metric:** each look
+  (`POST /experiments/{id}/checkpoints`, or the app's "Log this checkpoint")
+  is recorded for every treatment arm on a given metric, and the peeking
+  check runs per arm (`AnalysisReport.sequential_risks`). The planned sample
+  size can change mid-test: thresholds already used keep their recorded
+  values and the alpha they spent is carried forward under the new plan.
 
 ## Known limitations (stated directly, not discovered later)
 
 - Live peeking checks use a **Lan-DeMets** boundary (O'Brien-Fleming-type
   spending, α(t) = 4 − 4Φ(z_{α/4}/√t)) driven by each look's information
   fraction, so irregular look times are handled exactly. It matches
-  published `ldbounds` values to ~0.001 in z. It still assumes the
-  **planned total sample size** is fixed up front: looking past it spends
-  nothing (those looks cannot reject), and changing the plan mid-test
-  is not supported. The index-based O'Brien-Fleming schedule remains
+  published `ldbounds` values to ~0.001 in z. A look past the planned
+  total spends nothing (it cannot reject) until the plan is increased; plan
+  changes must not be driven by the observed effect, or the error guarantee
+  no longer holds. The index-based O'Brien-Fleming schedule remains
   available (`spending="obrien_fleming"`) for planned equal spacing.
 - The multi-arm Dunnett adjustment uses the large-sample normal
-  approximation for the joint distribution of the comparisons.
-  The sequential-peeking check monitors a single stored p-value series per
-  experiment (in the app, the primary arm), not every arm.
+  approximation for the joint distribution of the comparisons. The
+  sequential check corrects for repeated looks within each arm, not jointly
+  across arms.
 - The Cochran's Q heterogeneity test has low power with few or small
   segments; a large p-value is not evidence that effects are equal.
 - The API's `POST /experiments/{id}/assign` only supports `mode="simulate"`;

@@ -19,8 +19,14 @@ from __future__ import annotations
 from fastapi import APIRouter, HTTPException, Response
 from sqlalchemy import text
 
-from api.schemas import AnalysisReportSchema, AnalyzeRequest
+from api.schemas import (
+    AnalysisReportSchema,
+    AnalyzeRequest,
+    CheckpointRequest,
+    RecordedLookSchema,
+)
 from core.data_access import get_stored_report
+from core.monitoring import record_look
 from core.pipeline import analyze_experiment
 from db.connection import get_engine
 
@@ -95,3 +101,20 @@ def get_report(
         )
     response.headers["X-Report-Computed-At"] = stored["computed_at"]
     return AnalysisReportSchema.model_validate(stored["report"])
+
+
+@router.post("/{experiment_id}/checkpoints", response_model=list[RecordedLookSchema])
+def record_checkpoint(experiment_id: str, request: CheckpointRequest) -> list[RecordedLookSchema]:
+    """
+    Records a sequential look NOW: the current p-value of every treatment
+    arm vs control on `metric`, with the peeking-corrected threshold in
+    force (from the experiment's stored schedule; 0.05 if none). Later
+    POST /analyze calls evaluate peeking risk against this history.
+    """
+    engine = get_engine()
+    _require_experiment_exists(engine, experiment_id)
+    try:
+        looks = record_look(engine, experiment_id, metric_name=request.metric)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return [RecordedLookSchema.model_validate(look) for look in looks]

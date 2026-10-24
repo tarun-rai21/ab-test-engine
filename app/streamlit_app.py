@@ -32,9 +32,9 @@ from core.data_access import (
     ALLOWED_SEGMENT_COLUMNS,
     get_inference_data,
     save_planned_schedule,
-    split_arms,
 )
 from core.metrics import METRICS
+from core.monitoring import max_users_per_variant
 from core.pipeline import analyze_experiment
 
 st.set_page_config(page_title="A/B Test Analysis Engine", layout="wide")
@@ -155,18 +155,14 @@ render_effect_panel(
 )
 st.divider()
 
-# Checkpoint p-values are logged for the primary comparison (first arm).
-control_df, arm_dfs = split_arms(get_inference_data(get_session_engine(), experiment_id))
-treatment_df = next(iter(arm_dfs.values()))
-
+inference_df = get_inference_data(get_session_engine(), experiment_id)
 render_sequential_panel(
     get_session_engine(),
     experiment_id,
-    report.sequential_risk,
-    control_df=control_df,
-    treatment_df=treatment_df,
+    report.sequential_risks,
+    max_users_per_variant=max_users_per_variant(inference_df),
+    arm_names=[c.treatment_arm for c in report.comparisons],
     metric_name=report.metric_name,
-    winsorization_cap=report.winsorization_cap,
     n_checkpoints_planned=int(n_checkpoints_planned) if enable_sequential else None,
     checkpoint_n=int(checkpoint_n) if enable_sequential else None,
 )

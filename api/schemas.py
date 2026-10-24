@@ -150,6 +150,9 @@ class SequentialCheckResultSchema(BaseModel):
     beyond_plan: bool
     spending: str
     information_fraction: float | None
+    treatment_arm: str | None = None
+    metric_name: str | None = None
+    replanned: bool = False
     latest_checkpoint_n: int
 
 
@@ -208,3 +211,23 @@ class AnalysisReportSchema(BaseModel):
     comparisons: tuple[ArmComparisonSchema, ...] = ()
     # Older stored reports predate the option and were always Holm-adjusted.
     multiple_comparison: str = "holm"
+    sequential_risks: tuple[SequentialCheckResultSchema, ...] = ()
+
+
+# ===================================================================== #
+# POST /experiments/{id}/checkpoints
+# ===================================================================== #
+
+class CheckpointRequest(BaseModel):
+    metric: Literal["conversion", "revenue_per_user", "revenue_per_conversion"] = "conversion"
+
+
+class RecordedLookSchema(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    treatment_arm: str
+    metric_name: str
+    cumulative_n: int
+    p_value: float
+    alpha_threshold: float
+    planned_total_n: int | None
+    corrected_significant: bool

@@ -136,6 +136,7 @@ class AnalysisReport:
     winsorization_cap: float | None = None  # revenue_per_user cap applied, if any
     comparisons: tuple[ArmComparison, ...] = ()  # every treatment arm vs control
     multiple_comparison: str = "dunnett"  # "dunnett" | "holm" — see core.multiple_testing
+    sequential_risks: tuple[SequentialCheckResult, ...] = ()  # one per monitored arm
 
 
 def _adjust_p_values(
@@ -355,12 +356,20 @@ def analyze_experiment(
         stored_schedule = get_planned_schedule(engine, experiment_id)
         if stored_schedule is not None:
             n_checkpoints_planned, checkpoint_n = stored_schedule
+    # One check per treatment arm on THIS metric: each arm-vs-control
+    # comparison has its own look history (core.monitoring.record_look).
+    sequential_risks: list[SequentialCheckResult] = []
     if n_checkpoints_planned is not None and checkpoint_n is not None:
-        checkpoints = get_sequential_checkpoints(engine, experiment_id)
-        if checkpoints:
-            sequential_risk = sequential_check(
-                checkpoints, n_checkpoints_planned, checkpoint_n, spending=spending
-            )
+        for arm in arms:
+            checkpoints = get_sequential_checkpoints(engine, experiment_id, metric_name, arm)
+            if checkpoints:
+                sequential_risks.append(replace(
+                    sequential_check(
+                        checkpoints, n_checkpoints_planned, checkpoint_n, spending=spending
+                    ),
+                    treatment_arm=arm, metric_name=metric_name,
+                ))
+    sequential_risk = sequential_risks[0] if sequential_risks else None
 
     # --- Segment analysis (Phase 6): optional, see design decision 5. Run
     # for every treatment arm against control.
@@ -423,6 +432,7 @@ def analyze_experiment(
         winsorization_cap=cap,
         comparisons=comparisons,
         multiple_comparison=multiple_comparison,
+        sequential_risks=tuple(sequential_risks),
     )
 
     if persist:
