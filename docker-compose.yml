@@ -5,7 +5,9 @@
 # them; left empty, both services are open (local use only).
 services:
   api:
-    build: .
+    build:
+      context: .
+      target: api
     ports:
       - "8000:8000"
     environment:
@@ -16,27 +18,16 @@ services:
     restart: unless-stopped
 
   app:
-    build: .
-    command:
-      - streamlit
-      - run
-      - app/streamlit_app.py
-      - --server.address=0.0.0.0
-      - --server.port=8501
-      - --server.headless=true
+    build:
+      context: .
+      target: app
     ports:
       - "8501:8501"
     environment:
       APP_PASSWORD: ${APP_PASSWORD:-}
     # The Streamlit app keeps one in-memory database per browser session by
-    # design, so it does not need the API's volume. Its health check
-    # targets Streamlit's own endpoint rather than the API's /health.
-    healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8501/_stcore/health', timeout=4)"]
-      interval: 30s
-      timeout: 5s
-      start_period: 20s
-      retries: 3
+    # design, so it does not need the API's volume. Each image defines its
+    # own health check (Dockerfile).
     restart: unless-stopped
 
 volumes:
