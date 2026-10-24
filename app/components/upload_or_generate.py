@@ -10,32 +10,33 @@ introduces a second, divergent analysis code path.
 MODE 1 — "Generate simulated data": wraps db.seed.seed_database() (Phase
 1/7, already tested) with Streamlit input widgets.
 
-MODE 2 — "Upload CSV": SCOPE DECISION, stated directly rather than
-silently assumed — the CSV must already be shaped like
-core.data_access.get_inference_data()'s OUTPUT (one row per user), not an
-arbitrary raw multi-table schema. Required columns: variant_id (ending in
-"_control", or containing "_treatment" — "_treatment_b" etc. for extra
-arms), converted (0/1). Optional: pre_period_covariate
-(needed for CUPED; without it, CUPED is unavailable for this dataset),
-device_type/region/existing_customer (segment columns). Reconstructing a
-full multi-table schema from an arbitrary spreadsheet is a much bigger,
-fragile guessing problem than the rest of this app — out of scope here,
-same reasoning already applied to Phase 7's mode="ingest" deferral.
+MODE 2 — "Upload CSV": one row per user, in the source system's own shape.
+Columns are mapped onto the canonical ones (variant, converted, and the
+optional user_id, revenue, pre_period_covariate and segment columns), and
+raw variant labels such as "A"/"B" onto control / treatment arms — see
+core.ingestion, which the API's POST /experiments/{id}/ingest shares.
+Files already using the canonical names need no mapping.
 """
 
 from __future__ import annotations
 
+import hashlib
+import io
+import json
 import uuid
 
 import pandas as pd
 import streamlit as st
-from sqlalchemy import Engine, text
+from sqlalchemy import Engine
 
+from core.ingestion import (
+    create_experiment_with_variants,
+    ingest_canonical,
+    to_canonical,
+    validate_canonical,
+)
 from db.connection import create_memory_engine
 from db.seed import seed_database
-
-REQUIRED_CSV_COLUMNS = ("variant_id", "converted")
-OPTIONAL_SEGMENT_COLUMNS = ("device_type", "region", "existing_customer")
 
 
 def get_session_engine() -> Engine:
@@ -65,146 +66,43 @@ def _generate_experiment_id() -> str:
     return f"exp_{uuid.uuid4().hex[:12]}"
 
 
-def arm_name(variant_id: str) -> str | None:
+def validate_upload(
+    df: pd.DataFrame,
+    columns: dict[str, str] | None = None,
+    variant_values: dict[str, str | None] | None = None,
+) -> list[str]:
     """
-    Variant name implied by an uploaded variant_id: '..._control' ->
-    'control'; otherwise the text from the LAST '_treatment' onward, so
-    'exp_treatment' -> 'treatment' and 'exp_treatment_b' -> 'treatment_b'.
-    None if the id matches neither pattern.
+    Problems with an uploaded DataFrame under the given column mapping
+    ([] = valid). See core.ingestion for the mapping rules.
     """
-    if variant_id.endswith("_control"):
-        return "control"
-    position = variant_id.rfind("_treatment")
-    return variant_id[position + 1:] if position != -1 else None
-
-
-def validate_upload(df: pd.DataFrame) -> list[str]:
-    """
-    Returns a list of human-readable problems with an uploaded DataFrame
-    (empty list = valid). Pure, so it is testable without Streamlit.
-    """
-    missing = [c for c in REQUIRED_CSV_COLUMNS if c not in df.columns]
-    if missing:
-        return [f"Missing required column(s): {missing}"]
-
-    errors = []
-    arm_names = [arm_name(v) for v in df["variant_id"].astype(str)]
-    if None in arm_names:
-        errors.append(
-            "Every variant_id value must end in '_control', or contain '_treatment' "
-            "(e.g. 'myexp_control', 'myexp_treatment', 'myexp_treatment_b'). "
-            "Found values that don't match this pattern."
-        )
-    elif "control" not in arm_names or set(arm_names) == {"control"}:
-        errors.append("The data needs a control group and at least one treatment arm.")
-    converted = pd.to_numeric(df["converted"], errors="coerce")
-    if converted.isna().any() or not converted.isin([0, 1]).all():
-        errors.append("Every 'converted' value must be 0 or 1 (no blanks).")
-    if "user_id" in df.columns and df["user_id"].duplicated().any():
-        errors.append("user_id values must be unique — this format is one row per user.")
-    if "revenue" in df.columns:
-        revenue = pd.to_numeric(df["revenue"], errors="coerce")
-        if revenue.isna().any() or (revenue < 0).any():
-            errors.append("revenue must be numeric, non-negative, with no blanks.")
-        elif ((revenue > 0) & (pd.to_numeric(df["converted"], errors="coerce") != 1)).any():
-            errors.append("Rows with revenue > 0 must have converted = 1.")
-    if "pre_period_covariate" in df.columns and pd.to_numeric(
-        df["pre_period_covariate"], errors="coerce"
-    ).isna().any():
-        errors.append(
-            "pre_period_covariate must be numeric with no blanks (or omit the "
-            "column entirely to run without CUPED)."
-        )
-    return errors
+    try:
+        canonical = to_canonical(df, columns, variant_values)
+    except ValueError as exc:
+        return [str(exc)]
+    return validate_canonical(canonical)
 
 
 def ingest_upload(
-    engine: Engine, df: pd.DataFrame, experiment_id: str, treatment_split: float = 0.5
+    engine: Engine,
+    df: pd.DataFrame,
+    experiment_id: str,
+    treatment_split: float = 0.5,
+    columns: dict[str, str] | None = None,
+    variant_values: dict[str, str | None] | None = None,
 ) -> None:
     """
-    Writes a validated upload (see validate_upload) into the schema as one
-    experiment. Pure database code, testable without Streamlit.
-
-    treatment_split is the INTENDED share of users across ALL treatment
-    arms, split equally between arms; control gets the rest. Stored in
-    variants.split_pct for the SRM check (it used to be hard-coded to 0.5,
-    so a real 90/10 design was falsely flagged as SRM — review issue M3).
-    Arms come from the variant_id naming convention (see arm_name()).
-
-    Stored user_ids are prefixed with experiment_id: the session DB
-    persists across uploads, so a second upload reusing the same ids
-    (generated or user-supplied) would otherwise collide on users.user_id
-    or join to a previous upload's attributes (review issues H1/M3).
+    Creates a new experiment for an uploaded file and ingests it.
+    treatment_split is the intended share of users across all treatment
+    arms (used by the SRM check).
     """
-    if not (0.0 < treatment_split < 1.0):
-        raise ValueError(f"treatment_split must be in (0,1), got {treatment_split}")
-
-    df = df.copy()
-    if "user_id" not in df.columns:
-        df["user_id"] = [f"{i:07d}" for i in range(len(df))]
-    df["user_id"] = [f"u_{experiment_id}_{uid}" for uid in df["user_id"]]
-    if "pre_period_covariate" not in df.columns:
-        df["pre_period_covariate"] = None
-    for col in OPTIONAL_SEGMENT_COLUMNS:
-        if col not in df.columns:
-            df[col] = None
-
-    # Whatever prefix the uploaded file's variant_id values originally had
-    # doesn't need to match experiment_id — every downstream query filters
-    # by the assignments table's own experiment_id column.
-    df["variant_name"] = [arm_name(str(v)) for v in df["variant_id"]]
-    df["variant_id"] = [f"{experiment_id}_{name}" for name in df["variant_name"]]
-    arms = sorted(set(df["variant_name"]) - {"control"})
-    variants = pd.DataFrame(
-        [{"variant_id": f"{experiment_id}_control", "experiment_id": experiment_id,
-          "name": "control", "split_pct": 1 - treatment_split}]
-        + [{"variant_id": f"{experiment_id}_{arm}", "experiment_id": experiment_id,
-            "name": arm, "split_pct": treatment_split / len(arms)} for arm in arms]
+    canonical = to_canonical(df, columns, variant_values)
+    errors = validate_canonical(canonical)
+    if errors:
+        raise ValueError(" ".join(errors))
+    create_experiment_with_variants(
+        engine, experiment_id, list(canonical["variant_name"].unique()), treatment_split
     )
-    df["converted"] = pd.to_numeric(df["converted"]).astype(int)
-    # Per-user revenue becomes the value of that user's conversion event;
-    # without a revenue column every conversion is worth 1.0 (as before).
-    df["revenue"] = (
-        pd.to_numeric(df["revenue"]) if "revenue" in df.columns
-        else df["converted"].astype(float)
-    )
-
-    users = pd.DataFrame({
-        "user_id": df["user_id"],
-        "signup_date": "2025-01-01",
-        "device_type": df["device_type"],
-        "region": df["region"],
-        "existing_customer": [
-            bool(v) if pd.notna(v) else None for v in df["existing_customer"]
-        ],
-        "pre_period_covariate": pd.to_numeric(df["pre_period_covariate"], errors="coerce"),
-    })
-    assignments = pd.DataFrame({
-        "user_id": df["user_id"],
-        "experiment_id": experiment_id,
-        "variant_id": df["variant_id"],
-        "assigned_at": "2025-01-01",
-    })
-    converters = df.loc[df["converted"] == 1].reset_index(drop=True)
-    converted_ids = converters["user_id"]
-    events = pd.DataFrame({
-        "event_id": [f"ev_{experiment_id}_{i:07d}" for i in range(len(converted_ids))],
-        "user_id": converted_ids,
-        "experiment_id": experiment_id,
-        "event_type": "conversion",
-        "event_timestamp": "2025-01-02",
-        "value": converters["revenue"].astype(float),
-    })
-
-    with engine.begin() as conn:
-        conn.execute(text(
-            "INSERT INTO experiments (experiment_id, name, start_date, status) "
-            "VALUES (:eid, 'Uploaded dataset', '2025-01-01', 'analyzed')"
-        ), {"eid": experiment_id})
-        variants.to_sql("variants", conn, if_exists="append", index=False)
-        users.to_sql("users", conn, if_exists="append", index=False)
-        assignments.to_sql("assignments", conn, if_exists="append", index=False)
-        events.to_sql("events", conn, if_exists="append", index=False)
+    ingest_canonical(engine, experiment_id, canonical)
 
 
 def render_generate_data_form() -> str | None:
@@ -298,51 +196,128 @@ def render_generate_data_form() -> str | None:
     return sim_experiment_id
 
 
+def _column_mapping_widgets(df: pd.DataFrame) -> tuple[dict[str, str], dict[str, str | None]]:
+    """Lets the user say which column plays which role, and what each raw
+    variant value means."""
+    none = "— not in this file —"
+    options = [none, *df.columns]
+
+    def pick(label: str, role: str, guesses: tuple[str, ...], required: bool = False):
+        default = next((c for c in df.columns if c.lower() in guesses), None)
+        choices = list(df.columns) if required else options
+        index = choices.index(default) if default in choices else 0
+        return st.selectbox(label, choices, index=index, key=f"map_{role}")
+
+    col1, col2 = st.columns(2)
+    with col1:
+        variant_col = pick("Variant / group column", "variant",
+                           ("variant", "variant_id", "group", "arm", "bucket"), required=True)
+        converted_col = pick("Converted column (0/1, true/false, yes/no)", "converted",
+                             ("converted", "conversion", "purchased", "converted_flag"))
+        revenue_col = pick("Revenue per user", "revenue", ("revenue", "spend", "amount"))
+        user_col = pick("User id", "user_id", ("user_id", "user", "uid", "customer",
+                                               "customer_id", "visitor_id", "id"))
+    with col2:
+        covariate_col = pick("Pre-period covariate (for CUPED)", "pre_period_covariate",
+                             ("pre_period_covariate", "pre_spend", "baseline"))
+        device_col = pick("Device type segment", "device_type", ("device_type", "device"))
+        region_col = pick("Region segment", "region", ("region", "country", "market"))
+        customer_col = pick("Existing-customer segment", "existing_customer",
+                            ("existing_customer", "returning", "is_existing"))
+
+    columns = {"variant": variant_col}
+    for role, col in (("converted", converted_col), ("revenue", revenue_col),
+                      ("user_id", user_col), ("pre_period_covariate", covariate_col),
+                      ("device_type", device_col), ("region", region_col),
+                      ("existing_customer", customer_col)):
+        if col != none:
+            columns[role] = col
+
+    raw_values = sorted(df[variant_col].astype(str).str.strip().unique())
+    if len(raw_values) > 10:
+        st.error(f"The variant column has {len(raw_values)} distinct values — is it the "
+                 f"right column?")
+        return columns, {}
+    st.markdown("**What does each variant value mean?**")
+    choices = ["control", "treatment", "treatment_b", "treatment_c", "ignore these rows"]
+    variant_values: dict[str, str | None] = {}
+    value_cols = st.columns(min(len(raw_values), 4))
+    for i, value in enumerate(raw_values):
+        default = "control" if "control" in value.lower() or i == 0 else (
+            choices[min(i, 3)] if i > 0 else "treatment"
+        )
+        with value_cols[i % len(value_cols)]:
+            meaning = st.selectbox(f"`{value}`", choices, index=choices.index(default),
+                                   key=f"variant_value_{value}")
+        variant_values[value] = None if meaning == "ignore these rows" else meaning
+    return columns, variant_values
+
+
 def render_upload_form() -> str | None:
     """
     Renders the 'upload a CSV' form. Returns the experiment_id once a
     valid file has been uploaded and ingested, or None otherwise.
+
+    Ingestion is remembered per (file contents, mapping, split): Streamlit
+    re-runs this script on every click, and re-ingesting the still-attached
+    file each time used to create a NEW experiment on every interaction,
+    discarding the report and piling copies into the database.
     """
     st.subheader("Upload your own data")
     st.caption(
-        f"CSV must have one row per user, with columns: "
-        f"{', '.join(REQUIRED_CSV_COLUMNS)} (required), plus optionally "
-        f"user_id, revenue (per-user, for revenue metrics), pre_period_covariate "
-        f"(needed for CUPED) and/or "
-        f"{', '.join(OPTIONAL_SEGMENT_COLUMNS)} (for segment analysis). "
-        f"variant_id values must end in '_control' or contain '_treatment' "
-        f"(e.g. '_treatment', '_treatment_b' for extra arms)."
+        "One row per user. If your columns already use this project's names "
+        "(variant_id ending in '_control' / containing '_treatment', converted, "
+        "and optionally user_id, revenue, pre_period_covariate, device_type, region, "
+        "existing_customer), they are used directly; otherwise map them below."
     )
 
     treatment_split = st.number_input(
-        "Intended treatment allocation (used by the SRM check)",
+        "Intended share of users in treatment arms (used by the SRM check)",
         min_value=0.01, max_value=0.99, value=0.50, step=0.01,
     )
     uploaded_file = st.file_uploader("Choose a CSV file", type=["csv"])
     if uploaded_file is None:
         return None
 
+    content = uploaded_file.getvalue()
     try:
-        df = pd.read_csv(uploaded_file)
+        df = pd.read_csv(io.BytesIO(content))
     except Exception as exc:
         st.error(f"Could not read this file as a CSV: {exc}")
         return None
 
-    errors = validate_upload(df)
+    uses_convention = {"variant_id", "converted"} <= set(df.columns)
+    map_columns = st.checkbox(
+        "Map my columns (different column names or variant labels)",
+        value=not uses_convention,
+    )
+    columns, variant_values = (
+        _column_mapping_widgets(df) if map_columns else (None, None)
+    )
+
+    errors = validate_upload(df, columns, variant_values)
     if errors:
         for error in errors:
             st.error(error)
         return None
 
-    if "pre_period_covariate" not in df.columns:
-        st.warning(
-            "No pre_period_covariate column found — CUPED will not be "
-            "available for this dataset."
-        )
+    key = hashlib.sha256(
+        content + json.dumps([columns, variant_values, treatment_split],
+                             sort_keys=True, default=str).encode()
+    ).hexdigest()
+    ingested = st.session_state.setdefault("ingested_uploads", {})
+    if key in ingested:
+        return ingested[key]
+
+    if columns is None and "pre_period_covariate" not in df.columns or (
+        columns is not None and "pre_period_covariate" not in columns
+    ):
+        st.warning("No pre-period covariate — CUPED will not be available for this dataset.")
 
     experiment_id = _generate_experiment_id()
-    ingest_upload(get_session_engine(), df, experiment_id, float(treatment_split))
-
+    ingest_upload(get_session_engine(), df, experiment_id, float(treatment_split),
+                  columns, variant_values)
+    ingested[key] = experiment_id
     st.success(f"Ingested {len(df)} rows as experiment: {experiment_id}")
     return experiment_id
 

@@ -113,3 +113,33 @@ def test_peeking_check_logs_checkpoint_and_stores_schedule(app):
         ).fetchone()
     assert checkpoints == 1
     assert tuple(schedule) == (10, 400)
+
+
+def test_column_mapping_widgets_guess_roles_and_variant_meanings():
+    """
+    The upload form's mapping step on a spreadsheet with its own column
+    names and A/B labels (AppTest cannot attach a file, so the mapping
+    widgets are run on their own).
+    """
+    def mapping_page():
+        import pandas as pd
+        import streamlit as st
+
+        from app.components.upload_or_generate import _column_mapping_widgets
+
+        raw = pd.DataFrame({
+            "customer": ["c1", "c2", "c3", "c4"],
+            "bucket": ["A", "B", "A", "B"],
+            "purchased": ["yes", "no", "no", "yes"],
+            "spend": [10.0, 0.0, 0.0, 12.0],
+        })
+        columns, variant_values = _column_mapping_widgets(raw)
+        st.session_state["mapping"] = (columns, variant_values)
+
+    at = AppTest.from_function(mapping_page, default_timeout=TIMEOUT)
+    at.run()
+    assert not at.exception
+    columns, variant_values = at.session_state["mapping"]
+    assert columns == {"variant": "bucket", "converted": "purchased",
+                       "revenue": "spend", "user_id": "customer"}
+    assert variant_values == {"A": "control", "B": "treatment"}

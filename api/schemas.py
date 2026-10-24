@@ -9,16 +9,14 @@ core.pipeline.AnalysisReport) via e.g. AnalysisReportSchema.model_validate(repor
 — no manual field-by-field copying, and no risk of the API silently drifting
 out of sync with the underlying dataclasses as they evolve.
 
-SCOPE NOTE: the original spec's POST /experiments/{id}/assign describes two
-modes — "simulate" (generate synthetic data) and "ingest" (upload real data).
-Only "simulate" is implemented here. Real-data ingestion needs its own
-CSV-parsing and validation logic that belongs with Phase 8's upload flow, not
-duplicated here — a real, stated scope decision, not a silent gap.
+POST /experiments/{id}/assign generates SIMULATED data; real data goes
+through POST /experiments/{id}/ingest (IngestRequest), which shares
+core.ingestion's column mapping and validation with the Streamlit upload.
 """
 
 from __future__ import annotations
 
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import AliasChoices, BaseModel, ConfigDict, Field
 
@@ -231,3 +229,27 @@ class RecordedLookSchema(BaseModel):
     alpha_threshold: float
     planned_total_n: int | None
     corrected_significant: bool
+
+
+# ===================================================================== #
+# POST /experiments/{id}/ingest
+# ===================================================================== #
+
+class IngestRequest(BaseModel):
+    """
+    Real data, one object per user. Without `columns`, rows must use the
+    canonical names (variant_id ending in '_control' / containing
+    '_treatment', converted, optional user_id, revenue,
+    pre_period_covariate, device_type, region, existing_customer). With
+    `columns` ({role: source field}) and optionally `variant_values`
+    ({raw value: variant name or null to drop}), any shape works — see
+    core.ingestion. Variant names must match the experiment's variants.
+    """
+    rows: list[dict[str, Any]] = Field(min_length=1)
+    columns: dict[str, str] | None = None
+    variant_values: dict[str, str | None] | None = None
+
+
+class IngestResponse(BaseModel):
+    n_ingested: int
+    srm_check: SRMCheckSummary

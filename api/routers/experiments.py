@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import uuid
 
+import pandas as pd
 from fastapi import APIRouter, HTTPException
 from sqlalchemy import text
 
@@ -19,10 +20,13 @@ from api.schemas import (
     AssignResponse,
     ExperimentCreateRequest,
     ExperimentCreateResponse,
+    IngestRequest,
+    IngestResponse,
     PlannedScheduleRequest,
     SRMCheckSummary,
 )
 from core.data_access import get_variant_counts, save_planned_schedule
+from core.ingestion import ingest_canonical, to_canonical
 from core.validity import srm_check
 from db.connection import get_engine
 from db.seed import seed_assignments_for_existing_experiment
@@ -160,8 +164,9 @@ def assign(experiment_id: str, request: AssignRequest) -> AssignResponse:
         raise HTTPException(
             status_code=400,
             detail=(
-                f"mode={request.mode!r} not supported — only 'simulate' is "
-                f"implemented (see api/schemas.py's scope note)."
+                f"mode={request.mode!r} not supported here — /assign generates "
+                f"simulated data. Send real data to POST "
+                f"/experiments/{experiment_id}/ingest."
             ),
         )
 
@@ -224,4 +229,36 @@ def assign(experiment_id: str, request: AssignRequest) -> AssignResponse:
     return AssignResponse(
         n_assigned=sum(observed_counts),
         srm_check=SRMCheckSummary.model_validate(srm_result),
+    )
+
+
+@router.post("/{experiment_id}/ingest", response_model=IngestResponse)
+def ingest(experiment_id: str, request: IngestRequest) -> IngestResponse:
+    """
+    Loads REAL per-user data into an existing experiment (replacing any
+    earlier data for it) and runs an immediate SRM check against the
+    experiment's declared split. Columns and variant labels can be mapped;
+    problems with the data are returned as 422 with every issue listed.
+    """
+    engine = get_engine()
+    with engine.connect() as conn:
+        exists = conn.execute(
+            text("SELECT 1 FROM experiments WHERE experiment_id = :eid"),
+            {"eid": experiment_id},
+        ).fetchone()
+    if not exists:
+        raise HTTPException(status_code=404, detail=f"Experiment {experiment_id!r} not found")
+
+    try:
+        canonical = to_canonical(
+            pd.DataFrame(request.rows), request.columns, request.variant_values
+        )
+        n_ingested = ingest_canonical(engine, experiment_id, canonical)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    observed_counts, expected_ratios = get_variant_counts(engine, experiment_id)
+    return IngestResponse(
+        n_ingested=n_ingested,
+        srm_check=SRMCheckSummary.model_validate(srm_check(observed_counts, expected_ratios)),
     )

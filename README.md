@@ -211,6 +211,12 @@ and fixed.
   the experiment (`PUT /experiments/{id}/schedule`), and `GET /report`
   serves the stored result of the latest `POST /analyze` without
   recomputation.
+- **Real data:** `POST /experiments/{id}/ingest` (JSON rows) and the
+  Streamlit CSV upload share `core/ingestion.py`: map the file's own column
+  names onto variant / converted / revenue / user id / covariate / segment
+  roles, map raw variant labels (e.g. "A"/"B") onto control and arms or
+  drop them, and read conversion flags written as 0/1, true/false or
+  yes/no.
 - **Sequential monitoring per arm and metric:** each look
   (`POST /experiments/{id}/checkpoints`, or the app's "Log this checkpoint")
   is recorded for every treatment arm on a given metric, and the peeking
@@ -234,9 +240,6 @@ and fixed.
   across arms.
 - The Cochran's Q heterogeneity test has low power with few or small
   segments; a large p-value is not evidence that effects are equal.
-- The API's `POST /experiments/{id}/assign` only supports `mode="simulate"`;
-  real-data ingestion (`mode="ingest"`) is deferred to the Streamlit app's
-  upload flow.
-- The Streamlit app's CSV upload requires data already shaped like
-  `get_inference_data()`'s output (one row per user) — it does not
-  reconstruct a full multi-table schema from an arbitrary spreadsheet.
+- Real data must arrive as one row per user (variant, conversion and
+  optional revenue, covariate and segments); event-level logs need
+  aggregating to users first.

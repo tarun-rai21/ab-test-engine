@@ -32,8 +32,8 @@ def test_validate_upload_accepts_valid_data():
 @pytest.mark.parametrize("mutate, fragment", [
     (lambda df: df.drop(columns="converted"), "Missing required"),
     (lambda df: df.assign(variant_id="x_other"), "_control"),
-    (lambda df: df.assign(converted=2), "0 or 1"),
-    (lambda df: df.assign(converted=[None] + [0] * (len(df) - 1)), "0 or 1"),
+    (lambda df: df.assign(converted=2), "0/1"),
+    (lambda df: df.assign(converted=[None] + [0] * (len(df) - 1)), "0/1"),
     (lambda df: df.assign(user_id="same"), "unique"),
     (lambda df: df.assign(pre_period_covariate=[None] + [1.0] * (len(df) - 1)), "numeric"),
 ])
