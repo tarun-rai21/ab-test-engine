@@ -61,6 +61,10 @@ def srm_check(
         )
     if not np.isclose(sum(expected_ratios), 1.0, atol=1e-6):
         raise ValueError(f"expected_ratios must sum to 1.0, got {sum(expected_ratios)}")
+    if any(r <= 0 for r in expected_ratios):
+        # A zero expected count makes the statistic NaN, and NaN < threshold
+        # is False: a broken design would silently read as "not flagged".
+        raise ValueError(f"expected_ratios must all be positive, got {expected_ratios}")
     if any(c < 0 for c in observed_counts):
         raise ValueError(f"observed_counts must be non-negative, got {observed_counts}")
 

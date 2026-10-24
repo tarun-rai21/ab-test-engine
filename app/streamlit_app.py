@@ -68,6 +68,10 @@ new_experiment_id = render_data_input()
 if new_experiment_id is not None and new_experiment_id != st.session_state.get("experiment_id"):
     st.session_state["experiment_id"] = new_experiment_id
     st.session_state["report"] = None  # clear any stale report from a previous dataset
+# Regenerating with the same seed keeps the id exp_seed{seed} but replaces
+# every row behind it, so a report is only shown for the data it was run on.
+if st.session_state.get("report_data_version") != st.session_state.get("data_version"):
+    st.session_state["report"] = None
 
 experiment_id = st.session_state.get("experiment_id")
 
@@ -144,6 +148,7 @@ if st.button("▶️ Run analysis", type="primary"):
             checkpoint_n=int(checkpoint_n) if enable_sequential else None,
         )
         st.session_state["report"] = report
+        st.session_state["report_data_version"] = st.session_state.get("data_version")
     except ValueError as exc:
         st.error(f"Analysis failed: {exc}")
         st.session_state["report"] = None
@@ -173,7 +178,9 @@ inference_df = get_inference_data(get_session_engine(), experiment_id)
 render_sequential_panel(
     get_session_engine(),
     experiment_id,
-    report.sequential_risks,
+    # analyze_experiment() falls back to a schedule stored by an earlier run,
+    # so honour the checkbox here rather than showing a check it disabled.
+    report.sequential_risks if enable_sequential else (),
     max_users_per_variant=max_users_per_variant(inference_df),
     arm_names=[c.treatment_arm for c in report.comparisons],
     metric_name=report.metric_name,

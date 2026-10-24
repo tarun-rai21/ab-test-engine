@@ -26,7 +26,8 @@ from pydantic import AliasChoices, BaseModel, ConfigDict, Field
 
 class VariantCreateRequest(BaseModel):
     name: str = Field(min_length=1)
-    split_pct: float = Field(ge=0.0, le=1.0)
+    # A 0 share makes the SRM check's expected count 0 (chi-square undefined).
+    split_pct: float = Field(gt=0.0, le=1.0)
 
 
 class PlannedScheduleRequest(BaseModel):

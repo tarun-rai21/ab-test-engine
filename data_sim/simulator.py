@@ -156,6 +156,12 @@ class ExperimentSimulator:
             raise ValueError(
                 "Only one segment column may carry configured heterogeneity per generate() call."
             )
+        segment_columns = ("device_type", "region", "existing_customer")
+        if segment_heterogeneity and next(iter(segment_heterogeneity)) not in segment_columns:
+            raise ValueError(
+                f"segment_heterogeneity column must be one of {segment_columns}, "
+                f"got {next(iter(segment_heterogeneity))!r}"
+            )
 
         self.n_users = n_users
         self.baseline_rate = baseline_rate

@@ -22,6 +22,7 @@ import pytest
 
 from core.data_access import get_inference_data, split_by_variant
 from core.inference import raw_ttest_ci
+from core.pipeline import analyze_experiment
 from db.connection import get_engine, reset_engine
 from db.seed import seed_database
 
@@ -178,4 +179,37 @@ def test_ci_coverage_at_additional_configurations(
         f"[{COVERAGE_LOWER_BOUND}, {COVERAGE_UPPER_BOUND}]. This is a genuine "
         f"finding about Welch's df approximation at this configuration — "
         f"investigate before assuming it is either a code bug or noise."
+    )
+
+
+@pytest.mark.slow
+def test_cuped_ci_coverage_through_the_pipeline():
+    """
+    The CUPED estimate is what the report shows by default, but its
+    interval was only validated for variance reduction, not coverage.
+    theta is estimated from the same data and its uncertainty is ignored by
+    the Welch standard error; this checks that the shortcut does not cost
+    coverage, end to end through analyze_experiment().
+    """
+    n_simulations, true_effect, base_seed = 500, 0.02, 50000
+    contained_count = 0
+    for i in range(n_simulations):
+        seed = base_seed + i
+        reset_engine()
+        seed_database({"simulator": {
+            "n_users": 2000, "baseline_rate": 0.10, "true_effect": true_effect,
+            "covariate_correlation": 0.5, "seed": seed, "corrupted_split": None,
+        }}, database_url="sqlite:///:memory:")
+        cuped = analyze_experiment(get_engine(), f"exp_seed{seed}", persist=False).cuped_effect
+        contained_count += cuped.ci_lower <= true_effect <= cuped.ci_upper
+
+    observed_coverage = contained_count / n_simulations
+    print(
+        f"\n[CUPED, rho=0.5, n=2000] "
+        f"observed_coverage={observed_coverage:.4f} ({contained_count}/{n_simulations})"
+    )
+    assert COVERAGE_LOWER_BOUND <= observed_coverage <= COVERAGE_UPPER_BOUND, (
+        f"CUPED CI coverage {observed_coverage:.4f} falls outside the target band "
+        f"[{COVERAGE_LOWER_BOUND}, {COVERAGE_UPPER_BOUND}] — the estimated theta's "
+        f"uncertainty (ignored by the standard error) may matter at this n."
     )

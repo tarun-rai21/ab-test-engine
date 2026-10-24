@@ -157,13 +157,21 @@ def render_sequential_panel(
                 "the earlier plan keep the thresholds that were in force; the alpha "
                 "they spent is carried forward under the new plan."
             )
-        if any(r.beyond_plan for r in sequential_risks):
+        # The first look past the plan is the final analysis and spends the
+        # remaining alpha; only looks after it get a zero threshold.
+        if any(r.beyond_plan and r.corrected_threshold == 0.0 for r in sequential_risks):
             st.warning(
-                "The latest checkpoint is beyond the planned total sample size, so "
-                "the Lan-DeMets budget is fully spent and this look cannot produce a "
-                "significant result. To keep going, increase the planned schedule: "
-                "past looks keep their thresholds and the remaining alpha is spread "
-                "over the new plan."
+                "The latest checkpoint is beyond the planned total sample size and "
+                "the Lan-DeMets budget was already spent at an earlier look, so this "
+                "look cannot produce a significant result. To keep going, increase "
+                "the planned schedule: past looks keep their thresholds and the "
+                "remaining alpha is spread over the new plan."
+            )
+        elif any(r.beyond_plan for r in sequential_risks):
+            st.info(
+                "The latest checkpoint is beyond the planned total sample size. It is "
+                "treated as the final analysis and spends all remaining alpha; any "
+                "later look under this plan cannot produce a significant result."
             )
 
     _render_trace_plot(checkpoints, primary_arm)

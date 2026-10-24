@@ -273,6 +273,7 @@ def test_report_nonexistent_experiment_returns_404(client):
     {"covariate_correlation": -0.6},          # infeasible for the simulator's skewed covariate
     {"corrupted_split": 1.5},                 # outside (0, 1)
     {"segment_heterogeneity": {"device_type": {"mobile": 0.1}, "region": {"US": 0.1}}},
+    {"segment_heterogeneity": {"browser": {"chrome": 0.1}}},  # not a simulated column
 ])
 def test_assign_invalid_simulator_input_returns_422_not_500(client, overrides):
     """Review issue L1: these all used to surface as 500 Internal Server Error."""
@@ -287,6 +288,18 @@ def test_create_experiment_duplicate_variant_names_returns_422(client):
         "variants": [
             {"name": "control", "split_pct": 0.5},
             {"name": "control", "split_pct": 0.5},
+        ],
+    })
+    assert response.status_code == 422
+
+
+def test_create_experiment_zero_split_variant_returns_422(client):
+    response = client.post("/experiments", json={
+        "name": "zero",
+        "variants": [
+            {"name": "control", "split_pct": 0.5},
+            {"name": "treatment", "split_pct": 0.5},
+            {"name": "treatment_b", "split_pct": 0.0},
         ],
     })
     assert response.status_code == 422

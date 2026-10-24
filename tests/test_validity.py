@@ -45,6 +45,11 @@ def test_srm_ratios_not_summing_to_one_raises():
         srm_check([100, 100], [0.5, 0.6])
 
 
+def test_srm_zero_expected_ratio_raises_instead_of_passing_as_nan():
+    with pytest.raises(ValueError, match="positive"):
+        srm_check([100, 100, 0], [0.5, 0.5, 0.0])
+
+
 def test_required_sample_size_matches_hand_derivation():
     """Cross-checked by hand: n=3839 for baseline=0.10, mde=0.02, alpha=0.05, power=0.80."""
     result = required_sample_size(baseline_rate=0.10, mde=0.02)

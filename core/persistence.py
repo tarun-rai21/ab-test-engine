@@ -44,6 +44,27 @@ def _transaction(bind: Engine | Connection) -> Iterator[Connection]:
         with bind.begin() as conn:
             yield conn
 
+def clear_metric_results(
+    engine: Engine | Connection, experiment_id: str, metric_name: str
+) -> None:
+    """
+    Deletes every experiment_results row for (experiment, metric). The
+    pipeline runs this first, in the same transaction as the new rows, so
+    the table holds exactly the latest analysis of each metric — the same
+    rule as analysis_reports. Overwriting by result_id alone left rows the
+    new analysis did not produce (e.g. segment rows from an earlier run
+    with segments, computed on data that has since been replaced).
+    """
+    with _transaction(engine) as conn:
+        conn.execute(
+            text(
+                "DELETE FROM experiment_results "
+                "WHERE experiment_id = :eid AND metric_name = :metric"
+            ),
+            {"eid": experiment_id, "metric": metric_name},
+        )
+
+
 def persist_inference_result(
     engine: Engine | Connection,
     experiment_id: str,

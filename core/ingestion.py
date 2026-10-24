@@ -145,6 +145,14 @@ def validate_canonical(df: pd.DataFrame) -> list[str]:
             errors.append("revenue must be numeric, non-negative, with no blanks.")
         elif ((revenue > 0) & (converted != 1)).any():
             errors.append("Rows with revenue > 0 must have converted = 1.")
+    # Unrecognised values would otherwise become NaN, and bool(NaN) is True:
+    # "unknown" would be silently stored as an existing customer.
+    if "existing_customer" in df.columns and parse_binary(
+        df["existing_customer"].dropna()
+    ).isna().any():
+        errors.append(
+            "existing_customer must be 0/1, true/false or yes/no (blanks are allowed)."
+        )
     if "pre_period_covariate" in df.columns and pd.to_numeric(
         df["pre_period_covariate"], errors="coerce"
     ).isna().any():
