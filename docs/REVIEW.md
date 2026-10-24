@@ -306,9 +306,40 @@ Resolved on branch `close-remaining-limitations`, one commit each:
 | No interaction test; BH per column | Cochran's Q heterogeneity test; one BH across every segment test in a report | Q rejection 4.60% (null), 88.5% (theory 87%) |
 | GET `/report` recomputes | Full report + parameters stored in `analysis_reports`; result rows store p-value, SE, df, arm sizes; GET serves the stored report or 404 | Tests that the stored report survives data changes and matches POST |
 
-### Still open
+### Formerly open, since resolved
 
-Holm instead of Dunnett for multi-arm; sequential check monitors one
-p-value series per experiment; no CUPED for ratio metrics; Streamlit
-covered by headless smoke runs rather than UI tests; Starlette's `httpx` →
-`httpx2` deprecation warning in the test client.
+Step-down Dunnett is now the default multi-arm adjustment (Holm kept as
+an option); looks are recorded per (metric, arm); the ratio metric has
+CUPED via its delta-method linearization; Streamlit has headless AppTest
+UI tests; the test client uses `httpx2`.
+
+---
+
+## Second review (2026-10-25)
+
+Scope: every tracked file again, after the A/B/n, Dunnett, revenue-metric,
+monitoring and ingestion work. The statistical core held up: no new
+estimator or boundary bug was found, and the full slow suite was re-run.
+The findings are at the edges: UI state, input validation, persistence
+hygiene and documentation. All were reproduced with scripts before fixing,
+and each fix has a regression test that fails on the old code.
+
+| ID | Severity | Finding | Fix |
+|---|---|---|---|
+| R1 | Medium | Streamlit kept showing the old report after regenerating data with the same seed (same `exp_seed{seed}` id, all rows replaced): a 2,000-user report stayed on screen over 6,000-user data. | A per-session data version; a report is shown only for the data it was computed on. |
+| R2 | Medium | The first look past the planned total spends the remaining alpha and CAN reject (e.g. t=1.1 → threshold 0.0489), but the panel said it "cannot produce a significant result", and the docstring said every look past t=1 gets threshold 0. | Panel distinguishes "budget already spent" (threshold 0) from "final analysis past plan"; docstring corrected; test added. |
+| R3 | Low | Unticking "Enable peeking-risk check" did not disable it: the pipeline falls back to a schedule stored by an earlier run. | The app honours the checkbox when rendering. |
+| R4 | Low | Ingestion stored unrecognised `existing_customer` values ("unknown", "N/A") as `True` (`bool(NaN)` is `True`). | `validate_canonical` reports them. |
+| R5 | Low | A variant with `split_pct = 0` made the SRM statistic NaN, which reads as "not flagged". | API requires `split_pct > 0`; `srm_check` rejects non-positive ratios. |
+| R6 | Low | `/assign` with `segment_heterogeneity` on an unknown column returned 500. | Simulator validates the column → 422. |
+| R7 | Low | Re-analysis overwrote result rows by id only, so rows it did not produce (e.g. old segment rows computed on replaced data) stayed in `experiment_results`, marked trusted. | Each persisted analysis first clears that metric's rows, in the same transaction. |
+| R8 | Low | Docs drift: this file's "Still open" list, the validation report's limitations (claimed revenue metrics were unvalidated), `inference.py` calling persistence "not yet built" and CUPED "unbiased for ANY theta". | Updated. |
+| R9 | Gap | CUPED interval coverage (the default headline estimate) was never validated, only its variance reduction. | `test_cuped_ci_coverage_through_the_pipeline`: **94.6%** (473/500) at ρ=0.5, n=2000. |
+
+Design points kept as they are (documented, defensible): the peeking
+verdict uses the raw Welch p-value while the effect panel leads with
+CUPED and a naive 95% interval; peeking control is per arm, not joint;
+looks recorded before any plan existed are re-thresholded under the plan
+set later; the Streamlit replay takes equal users per variant even under
+unequal allocation; `GroundTruth.true_effect_realized` averages over all
+arms in A/B/n simulations.

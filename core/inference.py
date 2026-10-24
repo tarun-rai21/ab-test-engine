@@ -5,8 +5,8 @@ DESIGN CONSTRAINT (Phase 2 architectural decision): this module is PURE and
 has ZERO awareness of SRMResult or any 'trusted' concept. It does not know
 whether SRM passed, does not accept an SRM result as an argument, and does
 not tag its own output as trusted/untrusted. Trust-tagging happens exclusively
-at persistence time (core/persistence.py, not yet built), which will require
-both an InferenceResult and an SRMResult as separate explicit arguments before
+at persistence time (core/persistence.py), which requires both an
+InferenceResult and an SRMResult as separate explicit arguments before
 writing to experiment_results. This preserves the spec's four-independent-
 modules architecture (Section 4.1) — core/inference.py's correctness is
 therefore completely testable without ever touching core/validity.py.
@@ -129,12 +129,14 @@ def cuped_adjust(y: np.ndarray, x: np.ndarray) -> CupedAdjustment:
     predictor these are mathematically identical and the direct formula
     avoids the overhead and API surface of a full OLS call for one number.
 
-    UNBIASEDNESS: E[Y_cuped] = E[Y] - theta*E[X - mean(X)] = E[Y] - theta*0
-    = E[Y]. The adjustment is mean-zero by construction (X - mean(X) has
-    mean zero over the sample), so this does NOT change the expected value
-    of the effect estimate — only its variance. This is NOT an assumption,
-    it's an algebraic identity that holds for ANY theta, which is why CUPED
-    cannot introduce bias regardless of how well-chosen theta is.
+    UNBIASEDNESS: for a FIXED theta, the adjusted effect is
+    (mean(Y_t) - mean(Y_c)) - theta * (mean(X_t) - mean(X_c)), and
+    randomization makes E[mean(X_t) - mean(X_c)] = 0 for a pre-treatment X,
+    so the expected effect is unchanged — only its variance shrinks. Here
+    theta is ESTIMATED from the same data (both arms), so the estimator is
+    only asymptotically unbiased (O(1/n) bias) and the Welch standard error
+    ignores theta's own uncertainty; both are negligible at A/B-test sample
+    sizes (validated CUPED CI coverage matches the raw estimator's).
 
     CRITICAL PRECONDITION, not enforced by this function's signature (see
     caller responsibility below): X MUST be a pre-treatment covariate,

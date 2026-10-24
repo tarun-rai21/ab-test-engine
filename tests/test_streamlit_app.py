@@ -115,6 +115,41 @@ def test_peeking_check_logs_checkpoint_and_stores_schedule(app):
     assert tuple(schedule) == (10, 400)
 
 
+def test_regenerating_with_same_seed_clears_the_old_report(app):
+    """
+    Same seed -> same experiment_id (exp_seed42), but different data. The
+    report computed on the old data must not stay on screen.
+    """
+    _generate(app, n_users=2000)
+    _button(app, "Run analysis").click().run()
+    assert [m.value for m in app.metric if m.label == "Observed split"]
+
+    _generate(app, n_users=3000)
+    _assert_no_failures(app)
+    assert not [m for m in app.metric if m.label == "Observed split"]
+
+    # ...and the report survives ordinary interactions once re-run.
+    _button(app, "Run analysis").click().run()
+    app.multiselect[0].set_value(["device_type"]).run()
+    split = next(m.value for m in app.metric if m.label == "Observed split")
+    assert sum(int(n) for n in split.split(" / ")) == 3000
+
+
+def test_unticking_the_peeking_check_hides_its_verdict(app):
+    """The pipeline falls back to a stored schedule; the checkbox must still win."""
+    _generate(app)
+    peeking = next(c for c in app.checkbox if "peeking" in c.label)
+    peeking.check().run()
+    _button(app, "Run analysis").click().run()
+    _button(app, "Log this checkpoint").click().run()
+    next(c for c in app.checkbox if "peeking" in c.label).uncheck().run()
+    _button(app, "Run analysis").click().run()
+
+    _assert_no_failures(app)
+    assert not any("conclusions" in m.value for m in (*app.success, *app.error))
+    assert any("wasn't enabled" in w.value for w in app.warning)
+
+
 def test_column_mapping_widgets_guess_roles_and_variant_meanings():
     """
     The upload form's mapping step on a spreadsheet with its own column

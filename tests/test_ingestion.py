@@ -67,6 +67,16 @@ def test_unmapped_variant_values_are_reported():
     assert any("no recognised variant" in e for e in validate_canonical(canonical))
 
 
+def test_unrecognised_existing_customer_values_are_reported_not_stored_as_true():
+    raw = RAW.assign(returning=["yes", "no", "unknown", "N/A"] + [None] * 8)
+    canonical = to_canonical(raw, {**COLUMNS, "existing_customer": "returning"}, VARIANTS)
+    assert any("existing_customer" in e for e in validate_canonical(canonical))
+
+    raw = RAW.assign(returning=["yes", "no", "true", "0"] + [None] * 8)  # blanks are fine
+    canonical = to_canonical(raw, {**COLUMNS, "existing_customer": "returning"}, VARIANTS)
+    assert validate_canonical(canonical) == []
+
+
 @pytest.mark.parametrize("columns, message", [
     ({"converted": "bought"}, "'variant' column must be mapped"),
     ({"variant": "bucket"}, "Map a 'converted' column"),

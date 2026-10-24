@@ -66,6 +66,11 @@ def _generate_experiment_id() -> str:
     return f"exp_{uuid.uuid4().hex[:12]}"
 
 
+def _mark_data_changed() -> None:
+    """Bumps the session's data version, which invalidates any shown report."""
+    st.session_state["data_version"] = st.session_state.get("data_version", 0) + 1
+
+
 def validate_upload(
     df: pd.DataFrame,
     columns: dict[str, str] | None = None,
@@ -192,6 +197,7 @@ def render_generate_data_form() -> str | None:
         st.error(f"Could not generate data for this configuration: {exc}")
         return None
 
+    _mark_data_changed()
     st.success(f"Generated experiment: {sim_experiment_id}")
     return sim_experiment_id
 
@@ -318,6 +324,7 @@ def render_upload_form() -> str | None:
     ingest_upload(get_session_engine(), df, experiment_id, float(treatment_split),
                   columns, variant_values)
     ingested[key] = experiment_id
+    _mark_data_changed()
     st.success(f"Ingested {len(df)} rows as experiment: {experiment_id}")
     return experiment_id
 

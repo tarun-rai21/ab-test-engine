@@ -168,8 +168,9 @@ def lan_demets_boundary(
 
     Verified against published ldbounds values for 5 equally spaced looks
     (z = 4.877, 3.357, 2.680, 2.290, 2.031) in tests/test_sequential.py.
-    Looks past t = 1 have nothing left to spend and get threshold 0.0
-    (they can never reject).
+    The first look at or past t = 1 is the final analysis: it spends
+    whatever alpha remains (so it CAN reject). Any look after that has
+    nothing left to spend and gets threshold 0.0 (it can never reject).
 
     fixed_thresholds (optional, one entry per look, None = compute): looks
     whose boundary was ALREADY USED under an earlier plan keep that exact

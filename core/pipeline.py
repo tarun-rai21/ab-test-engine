@@ -97,7 +97,12 @@ from core.metrics import (
     winsorization_cap,
 )
 from core.multiple_testing import ADJUSTMENTS, dunnett_adjust, holm_adjust
-from core.persistence import persist_inference_result, persist_report, persist_srm_result
+from core.persistence import (
+    clear_metric_results,
+    persist_inference_result,
+    persist_report,
+    persist_srm_result,
+)
 from core.segments import SegmentAnalysisResult, apply_global_bh, segment_breakdown
 from core.sequential import SequentialCheckResult, sequential_check
 from core.validity import SRMResult, achievable_mde_from_se, mde_curve, srm_check
@@ -242,7 +247,8 @@ def analyze_experiment(
     # so a failure anywhere in the analysis leaves the database untouched —
     # including any earlier persisted analysis of this experiment.
     pending_writes: list[Callable[[Connection], None]] = [
-        partial(persist_srm_result, experiment_id=experiment_id, srm_result=srm_result)
+        partial(clear_metric_results, experiment_id=experiment_id, metric_name=metric_name),
+        partial(persist_srm_result, experiment_id=experiment_id, srm_result=srm_result),
     ]
     for arm, result in raw_by_arm.items():
         pending_writes.append(partial(

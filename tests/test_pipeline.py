@@ -627,6 +627,33 @@ def test_sequential_check_spending_option_flows_through_pipeline(isolated_db):
     assert obf.spending == "obrien_fleming" and obf.corrected_significant is False
 
 
+def test_reanalysis_replaces_the_metrics_earlier_result_rows(isolated_db):
+    """
+    Rows the new analysis does not produce (here: segment rows from an
+    earlier run with segments) must not linger next to the new ones, while
+    another metric's rows are left alone.
+    """
+    engine = isolated_db
+    seed_database({"simulator": {
+        "n_users": 3000, "baseline_rate": 0.10, "true_effect": 0.02,
+        "covariate_correlation": 0.3, "seed": 161, "corrupted_split": None,
+        "revenue_mean": 40.0,
+    }}, database_url="sqlite:///:memory:")
+
+    analyze_experiment(engine, "exp_seed161", segment_columns=["device_type"])
+    analyze_experiment(engine, "exp_seed161", metric_name="revenue_per_user")
+    analyze_experiment(engine, "exp_seed161")
+
+    with engine.connect() as conn:
+        rows = conn.execute(text(
+            "SELECT metric_name, method, segment FROM experiment_results "
+            "WHERE experiment_id = 'exp_seed161'"
+        )).fetchall()
+    conversion = {(r.method, r.segment) for r in rows if r.metric_name == "conversion"}
+    assert conversion == {("raw_ttest", None), ("cuped", None)}
+    assert sum(r.metric_name == "revenue_per_user" for r in rows) == 2
+
+
 def test_failed_analysis_writes_nothing_and_keeps_previous_results(isolated_db, monkeypatch):
     """
     All of an analysis's writes (result rows, SRM row, stored report) share

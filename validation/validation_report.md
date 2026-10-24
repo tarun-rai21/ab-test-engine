@@ -16,6 +16,11 @@ from theory.
 | n=2000, baseline=0.02, effect=+0.01 | 500 | **95.0%** (475/500) |
 | n=2000, baseline=0.90, effect=−0.02 | 500 | **95.4%** (477/500) |
 
+The CUPED interval — the estimate the report leads with — is checked
+end to end through `analyze_experiment()` at ρ=0.5, n=2000, effect +0.02:
+**94.6%** (473/500). Estimating θ from the same data and leaving its
+uncertainty out of the standard error costs no measurable coverage.
+
 The 94.4% at 1000 simulations is ~0.8 SE below nominal (binomial SE ≈
 0.73pp) — consistent with noise. Welch's df approximation holds at small n
 and near both probability boundaries.
@@ -104,7 +109,10 @@ mobile.
   spaced** looks. The Lan-DeMets boundary (the default for live checks)
   removes that assumption — 5.05% under irregular spacing — but still
   assumes a fixed planned total sample size.
-- Validation covers a binary conversion metric (plus one continuous CUPED
-  case); heavy-tailed revenue metrics are not validated.
+- Revenue metrics are validated at one configuration (section 4), not
+  across baselines and sample sizes the way conversion is (section 1).
+- The live monitoring path (record_look -> sequential_check) is tested
+  for correctness, not simulated for its false-positive rate; the rate
+  claims above come from simulate_peeking_fpr() with the same boundaries.
 - Segment recovery is a single large-n check, not a repeated-simulation
   rate.

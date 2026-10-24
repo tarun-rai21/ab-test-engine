@@ -334,6 +334,24 @@ def test_lan_demets_look_beyond_planned_information_cannot_reject():
     assert thresholds[1] > 0.0
 
 
+def test_lan_demets_first_look_past_plan_spends_remaining_alpha():
+    """
+    Overshooting the plan without a look at t=1 does NOT make the look
+    unable to reject: it is the final analysis and spends what is left.
+    """
+    thresholds = lan_demets_boundary([0.5, 1.1])
+    assert 0.04 < thresholds[-1] < 0.05
+    assert lan_demets_boundary([1.3]) == pytest.approx((0.05,), abs=1e-12)
+
+    result = sequential_check(
+        [{"cumulative_n": 2000, "p_value_at_check": 0.2},
+         {"cumulative_n": 4400, "p_value_at_check": 0.01}],
+        n_checkpoints_planned=10, checkpoint_n=400,
+    )
+    assert result.beyond_plan is True
+    assert result.corrected_significant is True
+
+
 def test_lan_demets_spending_function_endpoints():
     assert lan_demets_obf_spending(1.0, 0.05) == pytest.approx(0.05, abs=1e-12)
     assert lan_demets_obf_spending(1.5, 0.05) == pytest.approx(0.05, abs=1e-12)
